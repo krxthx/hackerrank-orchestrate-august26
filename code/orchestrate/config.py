@@ -19,6 +19,14 @@ MODEL = os.environ.get("ORCHESTRATE_MODEL", "claude-sonnet-4-5-20250929")
 API_BASE = os.environ.get("ORCHESTRATE_API_BASE") or None
 API_KEY = os.environ.get("ORCHESTRATE_API_KEY") or None
 
+# Model used for evaluate.py's rubric-judge pass. Deliberately separate from MODEL (the
+# router's model) so grading isn't done by the same model/provider that made the decisions --
+# reduces self-grading bias. litellm-agnostic like MODEL -- point it at whatever
+# provider/endpoint you have access to (set ORCHESTRATE_JUDGE_API_BASE/_KEY below if needed).
+JUDGE_MODEL = os.environ.get("ORCHESTRATE_JUDGE_MODEL", "openrouter/openai/gpt-oss-20b:free")
+JUDGE_API_BASE = os.environ.get("ORCHESTRATE_JUDGE_API_BASE") or None
+JUDGE_API_KEY = os.environ.get("ORCHESTRATE_JUDGE_API_KEY") or None
+
 MAX_AGENT_STEPS = int(os.environ.get("ORCHESTRATE_MAX_STEPS", "12"))
 
 TRANSCRIPTS_DIR = "transcripts"

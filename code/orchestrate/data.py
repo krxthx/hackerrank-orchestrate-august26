@@ -37,6 +37,22 @@ class Dataset:
             return os.path.join(self.root, self.voice_notes.loc[media_id, "file_path"])
         return None
 
+    def messages_by_id(self, user_id: str, message_ids: list[str]) -> list[dict]:
+        """Fetch specific past messages by ID (for this user), each with its event outcome.
+        Used by evaluate.py to show a judge the actual content behind a cited
+        evidence_message_ids value, rather than trusting the citation blindly.
+        """
+        rows = self.message_history[
+            (self.message_history.user_id == user_id) & (self.message_history.message_id.isin(message_ids))
+        ]
+        records = []
+        for _, row in rows.iterrows():
+            record = row.to_dict()
+            key = (user_id, row["message_id"])
+            record["events"] = self.message_events.loc[key].to_dict() if key in self.message_events.index else None
+            records.append(record)
+        return records
+
 
 @lru_cache(maxsize=1)
 def get_dataset() -> Dataset:
