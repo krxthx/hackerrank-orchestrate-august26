@@ -12,6 +12,13 @@ load_dotenv()
 #   OpenAI    : gpt-4.1
 MODEL = os.environ.get("ORCHESTRATE_MODEL", "claude-sonnet-4-5-20250929")
 
+# Optional: point at any OpenAI-compatible endpoint (vLLM, Together, Groq, LM Studio, a
+# local proxy, etc). Set MODEL to "openai/<model-name>", this to the endpoint's base URL, and
+# API_KEY to whatever that endpoint expects. Leave both unset to use the provider's default
+# endpoint/key (Anthropic/Gemini/OpenAI/Ollama as picked by MODEL).
+API_BASE = os.environ.get("ORCHESTRATE_API_BASE") or None
+API_KEY = os.environ.get("ORCHESTRATE_API_KEY") or None
+
 MAX_AGENT_STEPS = int(os.environ.get("ORCHESTRATE_MAX_STEPS", "12"))
 
 TRANSCRIPTS_DIR = "transcripts"

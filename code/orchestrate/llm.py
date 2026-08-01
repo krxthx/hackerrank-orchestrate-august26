@@ -8,7 +8,7 @@ challenge needs.
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from orchestrate.config import MODEL
+from orchestrate.config import API_BASE, API_KEY, MODEL
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
@@ -17,6 +17,8 @@ def complete(
     *,
     tools: list[dict] | None = None,
     model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
     **kwargs,
 ):
     """Call the configured model. Returns the raw litellm response object.
@@ -25,6 +27,10 @@ def complete(
         [{"role": "user"/"assistant"/"system"/"tool", "content": "..."}]
     `tools` follows the OpenAI tool-calling schema (litellm translates this
     for whichever provider is configured).
+
+    Pass `model="openai/<name>"` with `ORCHESTRATE_API_BASE`/`ORCHESTRATE_API_KEY` set (or
+    `api_base=`/`api_key=` here) to point at any OpenAI-compatible endpoint instead of a
+    named provider.
     """
     import litellm
 
@@ -32,5 +38,7 @@ def complete(
         model=model or MODEL,
         messages=messages,
         tools=tools,
+        api_base=api_base or API_BASE,
+        api_key=api_key or API_KEY,
         **kwargs,
     )
