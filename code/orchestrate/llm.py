@@ -33,17 +33,27 @@ def complete(
     Pass `model="openai/<name>"` with `ORCHESTRATE_API_BASE`/`ORCHESTRATE_API_KEY` set (or
     `api_base=`/`api_key=` here) to point at any OpenAI-compatible endpoint instead of a
     named provider.
+
+    The ORCHESTRATE_API_BASE/API_KEY fallback only applies when `model` is left unset (i.e.
+    this call is using the default router model/endpoint). Callers that pass an explicit
+    `model` (e.g. evaluate.py's judge pass, which deliberately uses a different
+    model/provider from the router) get exactly the api_base/api_key they passed -- even if
+    that's None -- so a differently-configured call never silently rides on the router's
+    endpoint/credentials.
     """
     import litellm
 
     if LLM_CALL_PACING_SECONDS > 0:
         time.sleep(LLM_CALL_PACING_SECONDS)
 
+    resolved_api_base = api_base if model else (api_base or API_BASE)
+    resolved_api_key = api_key if model else (api_key or API_KEY)
+
     return litellm.completion(
         model=model or MODEL,
         messages=messages,
         tools=tools,
-        api_base=api_base or API_BASE,
-        api_key=api_key or API_KEY,
+        api_base=resolved_api_base,
+        api_key=resolved_api_key,
         **kwargs,
     )
