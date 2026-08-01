@@ -11,7 +11,6 @@ import json
 import logging
 import mimetypes
 import os
-import re
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +31,14 @@ from orchestrate.config import (
 )
 from orchestrate.constants import DEFAULT_OUTPUT_FILENAME
 from orchestrate.data import get_dataset
-from orchestrate.errors import ContentFilterBlockedError, DatasetError, classify_llm_error, describe_parse_error
+from orchestrate.errors import (
+    ContentFilterBlockedError,
+    DatasetError,
+    classify_llm_error,
+    describe_parse_error,
+    describe_step_limit,
+)
+from orchestrate.parsing import extract_json_object
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT
 from orchestrate.transcript import TranscriptLogger
 from orchestrate.types import RoutingDecision
@@ -40,8 +46,6 @@ from orchestrate.types import RoutingDecision
 logger = logging.getLogger(__name__)
 
 OUTPUT_COLUMNS = ["message_id", "action", "message_type", "reason", "confidence", "evidence_message_ids"]
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 _CHECKPOINT_FINGERPRINT_VERSION = 1
 _CONTEXT_FILENAMES = (
@@ -136,17 +140,6 @@ def _none_if_nan(value):
     return None if pd.isna(value) else value
 
 
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        text = re.sub(r"^json\s*", "", text, flags=re.IGNORECASE)
-    match = _JSON_OBJECT_RE.search(text)
-    if not match:
-        raise ValueError(f"no JSON object found in model output: {text[:200]!r}")
-    return json.loads(match.group(0))
-
-
 def _fallback_decision(message_id: str, reason: str) -> RoutingDecision:
     return RoutingDecision(
         message_id=message_id,
@@ -182,7 +175,7 @@ def parse_result(agent_output: str, message_id: str) -> RoutingDecision:
     low-confidence 'unknown' decision rather than crashing the batch on one bad row.
     """
     try:
-        payload = _extract_json(agent_output)
+        payload = extract_json_object(agent_output, label="model output")
         payload.setdefault("message_id", message_id)
         return RoutingDecision(**payload)
     except (ValueError, ValidationError, json.JSONDecodeError) as exc:
@@ -316,7 +309,10 @@ def run_pipeline(
                         logger=run_logger,
                         max_steps=ROUTER_MAX_STEPS,
                     )
-                    decision = parse_result(result.final_text, message_id)
+                    if result.hit_step_limit:
+                        decision = _fallback_decision(message_id, describe_step_limit(ROUTER_MAX_STEPS))
+                    else:
+                        decision = parse_result(result.final_text, message_id)
                 except DatasetError:
                     # Fatal -- a missing/malformed dataset file will fail identically on
                     # every remaining row, so stop the batch instead of silently

@@ -116,6 +116,16 @@ def describe_parse_error(exc: Exception) -> str:
     return f"could not parse a valid response ({type(exc).__name__}: {exc})"
 
 
+def describe_step_limit(max_steps: int) -> str:
+    """Consistent wording for 'the agent hit its tool-call step ceiling without ever
+    producing a final answer' -- kept distinct from describe_parse_error even though both
+    currently land in the same kind of fallback decision, because the root cause (a stuck
+    reasoning loop vs. a malformed final answer) is worth being honest about in the
+    recorded reason rather than collapsing into one generic message.
+    """
+    return f"the agent exceeded its {max_steps}-step tool-call limit without reaching a final decision"
+
+
 @contextlib.contextmanager
 def fatal_error_boundary():
     """Wrap a CLI entry point's main(). Any OrchestrateError prints its clean user_message;

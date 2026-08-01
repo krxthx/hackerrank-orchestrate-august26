@@ -1,41 +1,16 @@
 """Offline tests for evaluate.py's scoring logic -- no live LLM calls."""
 
-from orchestrate.evaluate import JudgeEvalResult, SampleEvalResult, _evidence_overlap, _evidence_set, _extract_json
+import pytest
+from pydantic import ValidationError
 
-
-def test_evidence_set_handles_none_and_nan():
-    assert _evidence_set("none") == set()
-    assert _evidence_set("") == set()
-    assert _evidence_set(None) == set()
-
-
-def test_evidence_set_splits_semicolons():
-    assert _evidence_set("message_0001;message_0002") == {"message_0001", "message_0002"}
-
-
-def test_evidence_overlap_both_empty_is_perfect_match():
-    assert _evidence_overlap("none", set()) == 1.0
-
-
-def test_evidence_overlap_one_empty_is_zero():
-    assert _evidence_overlap("message_0001", set()) == 0.0
-    assert _evidence_overlap("none", {"message_0001"}) == 0.0
-
-
-def test_evidence_overlap_partial_is_jaccard():
-    predicted = "message_0001;message_0002"
-    expected = {"message_0001", "message_0003"}
-    # intersection={0001} union={0001,0002,0003} -> 1/3
-    assert abs(_evidence_overlap(predicted, expected) - (1 / 3)) < 1e-9
-
-
-def test_evidence_overlap_exact_match_is_one():
-    assert _evidence_overlap("message_0001;message_0002", {"message_0001", "message_0002"}) == 1.0
+from orchestrate.evaluate import JudgeEvalResult, SampleEvalResult
+from orchestrate.parsing import extract_json_object
+from orchestrate.types import JudgeVerdict
 
 
 def test_extract_json_strips_code_fence():
     raw = '```json\n{"action_plausible": true, "reason_score": 4}\n```'
-    payload = _extract_json(raw)
+    payload = extract_json_object(raw)
     assert payload["action_plausible"] is True
     assert payload["reason_score"] == 4
 
@@ -95,3 +70,44 @@ def test_judge_eval_result_summary_all_errors():
     summary = result.summary()
     assert summary["errors"] == 1
     assert summary["scored"] == 0
+
+
+def test_judge_verdict_accepts_valid_payload():
+    verdict = JudgeVerdict(
+        action_plausible=True,
+        message_type_plausible=True,
+        reason_score=4,
+        evidence_score=3,
+        confidence_score=5,
+        safety_concern=False,
+        critique="looks fine",
+    )
+    assert verdict.reason_score == 4
+
+
+def test_judge_verdict_defaults_safety_concern_and_critique():
+    verdict = JudgeVerdict(
+        action_plausible=True,
+        message_type_plausible=True,
+        reason_score=4,
+        evidence_score=3,
+        confidence_score=5,
+    )
+    assert verdict.safety_concern is False
+    assert verdict.critique == ""
+
+
+def test_judge_verdict_rejects_out_of_range_score():
+    with pytest.raises(ValidationError):
+        JudgeVerdict(
+            action_plausible=True,
+            message_type_plausible=True,
+            reason_score=7,  # out of the 1-5 range
+            evidence_score=3,
+            confidence_score=5,
+        )
+
+
+def test_judge_verdict_rejects_missing_required_field():
+    with pytest.raises(ValidationError):
+        JudgeVerdict(action_plausible=True, message_type_plausible=True, reason_score=4, evidence_score=3)

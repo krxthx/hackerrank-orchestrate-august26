@@ -11,6 +11,7 @@ from orchestrate.errors import (
     OrchestrateError,
     classify_llm_error,
     describe_parse_error,
+    describe_step_limit,
     fatal_error_boundary,
     root_cause,
 )
@@ -68,6 +69,12 @@ def test_describe_parse_error_includes_exception_type():
     msg = describe_parse_error(ValueError("no JSON object found"))
     assert "ValueError" in msg
     assert "no JSON object found" in msg
+
+
+def test_describe_step_limit_includes_the_configured_ceiling():
+    msg = describe_step_limit(6)
+    assert "6-step" in msg
+    assert "final decision" in msg
 
 
 def test_orchestrate_error_str_includes_cause():

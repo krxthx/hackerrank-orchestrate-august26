@@ -74,3 +74,20 @@ class RoutingDecision(BaseModel):
     reason: str
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_message_ids: str = "none"
+
+
+class JudgeVerdict(BaseModel):
+    """One rubric-judge scoring of a RoutingDecision (see evaluate.py, prompts/judge.py).
+    Gives the judge's output the same structural validation RoutingDecision gets, rather
+    than trusting raw dict access -- a judge hallucinating an out-of-range score or the
+    wrong type fails validation and falls back cleanly instead of silently corrupting the
+    eval report.
+    """
+
+    action_plausible: bool
+    message_type_plausible: bool
+    reason_score: int = Field(ge=1, le=5)
+    evidence_score: int = Field(ge=1, le=5)
+    confidence_score: int = Field(ge=1, le=5)
+    safety_concern: bool = False
+    critique: str = ""

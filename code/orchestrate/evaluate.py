@@ -23,7 +23,6 @@ Two independent passes, since no hidden ground truth is available before submiss
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -33,15 +32,23 @@ from orchestrate.agent import run_agent
 from orchestrate.config import DATASET_DIR, JUDGE_API_BASE, JUDGE_API_KEY, JUDGE_MODEL, ROUTER_MAX_STEPS
 from orchestrate.constants import SYSTEM_ROLE, USER_ROLE
 from orchestrate.data import get_dataset
-from orchestrate.errors import DatasetError, DecisionParseError, OrchestrateError, classify_llm_error, describe_parse_error
+from orchestrate.errors import (
+    DatasetError,
+    DecisionParseError,
+    OrchestrateError,
+    classify_llm_error,
+    describe_parse_error,
+    describe_step_limit,
+)
+from orchestrate.evidence import evidence_overlap, parse_evidence_ids
 from orchestrate.llm import complete
+from orchestrate.parsing import extract_json_object
 from orchestrate.pipeline import build_user_content, parse_result
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT
 from orchestrate.tools import get_business_context, get_group_context, get_user_profile
+from orchestrate.types import JudgeVerdict
 
 logger = logging.getLogger(__name__)
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -62,24 +69,6 @@ INPUT_COLUMNS = [
     "media_id",
     "forwarded_count",
 ]
-
-
-def _evidence_set(value: str) -> set[str]:
-    if not value or pd.isna(value) or str(value).strip().lower() == "none":
-        return set()
-    return {v.strip() for v in str(value).split(";") if v.strip()}
-
-
-def _evidence_overlap(predicted: str, expected: set[str]) -> float:
-    """Jaccard similarity between predicted and expected evidence ID sets. Both-empty
-    (correctly abstaining) counts as a perfect match.
-    """
-    predicted_set = _evidence_set(predicted)
-    if not predicted_set and not expected:
-        return 1.0
-    if not predicted_set or not expected:
-        return 0.0
-    return len(predicted_set & expected) / len(predicted_set | expected)
 
 
 @dataclass
@@ -136,31 +125,35 @@ def run_sample_eval(
             input_row = row[[c for c in INPUT_COLUMNS if c in row.index]]
             content = build_user_content(input_row)
             agent_result = run_agent(DEFAULT_SYSTEM_PROMPT, content, max_steps=max_steps)
-            prediction = parse_result(agent_result.final_text, message_id)
-
-            expected_evidence = _evidence_set(row.get("evidence_message_ids"))
-            record = {
-                "message_id": message_id,
-                "ok": True,
-                "predicted_action": prediction.action,
-                "expected_action": row["action"],
-                "action_correct": prediction.action == row["action"],
-                "predicted_message_type": prediction.message_type,
-                "expected_message_type": row["message_type"],
-                "message_type_correct": prediction.message_type == row["message_type"],
-                "confidence": prediction.confidence,
-                "evidence_overlap": _evidence_overlap(prediction.evidence_message_ids, expected_evidence),
-            }
-            logger.info(
-                "[%d/%d] %s action=%s(expected %s) type=%s(expected %s)",
-                i + 1,
-                len(df),
-                message_id,
-                prediction.action,
-                row["action"],
-                prediction.message_type,
-                row["message_type"],
-            )
+            if agent_result.hit_step_limit:
+                err_message = describe_step_limit(max_steps)
+                logger.warning("sample eval hit step limit for %s: %s", message_id, err_message)
+                record = {"message_id": message_id, "ok": False, "error": err_message}
+            else:
+                prediction = parse_result(agent_result.final_text, message_id)
+                expected_evidence = parse_evidence_ids(row.get("evidence_message_ids"))
+                record = {
+                    "message_id": message_id,
+                    "ok": True,
+                    "predicted_action": prediction.action,
+                    "expected_action": row["action"],
+                    "action_correct": prediction.action == row["action"],
+                    "predicted_message_type": prediction.message_type,
+                    "expected_message_type": row["message_type"],
+                    "message_type_correct": prediction.message_type == row["message_type"],
+                    "confidence": prediction.confidence,
+                    "evidence_overlap": evidence_overlap(prediction.evidence_message_ids, expected_evidence),
+                }
+                logger.info(
+                    "[%d/%d] %s action=%s(expected %s) type=%s(expected %s)",
+                    i + 1,
+                    len(df),
+                    message_id,
+                    prediction.action,
+                    row["action"],
+                    prediction.message_type,
+                    row["message_type"],
+                )
         except DatasetError:
             # Fatal -- would fail identically on every remaining row.
             raise
@@ -175,17 +168,6 @@ def run_sample_eval(
 # ---------------------------------------------------------------------------
 # 2. Rubric-judge pass over dataset/output.csv
 # ---------------------------------------------------------------------------
-
-
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        text = re.sub(r"^json\s*", "", text, flags=re.IGNORECASE)
-    match = _JSON_OBJECT_RE.search(text)
-    if not match:
-        raise ValueError(f"no JSON object found in judge output: {text[:200]!r}")
-    return json.loads(match.group(0))
 
 
 def _build_judge_context(message_row: pd.Series, decision_row: pd.Series) -> str:
@@ -210,7 +192,7 @@ def _build_judge_context(message_row: pd.Series, decision_row: pd.Series) -> str
     if message_row.get("conversation_type") == "business" and not pd.isna(message_row.get("business_id")):
         context["business_context"] = json.loads(get_business_context(message_row["business_id"], user_id))
 
-    evidence_ids = _evidence_set(decision_row["evidence_message_ids"])
+    evidence_ids = parse_evidence_ids(decision_row["evidence_message_ids"])
     if evidence_ids:
         cited = ds.messages_by_id(user_id, list(evidence_ids))
         context["cited_evidence"] = cited
@@ -249,7 +231,7 @@ class JudgeEvalResult:
         }
 
 
-def _judge_one(context_json: str, judge_model: str) -> dict:
+def _judge_one(context_json: str, judge_model: str) -> JudgeVerdict:
     messages = [
         {"role": SYSTEM_ROLE, "content": JUDGE_SYSTEM_PROMPT},
         {"role": USER_ROLE, "content": context_json},
@@ -260,8 +242,9 @@ def _judge_one(context_json: str, judge_model: str) -> dict:
         raise classify_llm_error(exc) from exc
     text = response.choices[0].message.content or ""
     try:
-        return _extract_json(text)
-    except (ValueError, json.JSONDecodeError) as exc:
+        payload = extract_json_object(text, label="judge output")
+        return JudgeVerdict(**payload)
+    except (ValueError, json.JSONDecodeError, ValidationError) as exc:
         raise DecisionParseError(describe_parse_error(exc), cause=exc) from exc
 
 
@@ -295,20 +278,20 @@ def run_judge_eval(
             record = {
                 "message_id": message_id,
                 "ok": True,
-                "action_plausible": bool(verdict["action_plausible"]),
-                "message_type_plausible": bool(verdict["message_type_plausible"]),
-                "reason_score": int(verdict["reason_score"]),
-                "evidence_score": int(verdict["evidence_score"]),
-                "confidence_score": int(verdict["confidence_score"]),
-                "safety_concern": bool(verdict.get("safety_concern", False)),
-                "critique": verdict.get("critique", ""),
+                "action_plausible": verdict.action_plausible,
+                "message_type_plausible": verdict.message_type_plausible,
+                "reason_score": verdict.reason_score,
+                "evidence_score": verdict.evidence_score,
+                "confidence_score": verdict.confidence_score,
+                "safety_concern": verdict.safety_concern,
+                "critique": verdict.critique,
             }
         except OrchestrateError as exc:
+            # Covers both LLM-call failures (classify_llm_error) and a malformed verdict
+            # that failed JudgeVerdict's schema (DecisionParseError) -- both wrapped the
+            # same way by _judge_one, so one handler here is enough.
             logger.warning("judge failed to score %s: %s", message_id, exc)
             record = {"message_id": message_id, "ok": False, "error": exc.user_message}
-        except (ValidationError, KeyError) as exc:
-            logger.warning("judge returned a malformed verdict for %s: %s", message_id, exc)
-            record = {"message_id": message_id, "ok": False, "error": describe_parse_error(exc)}
         result.rows.append(record)
         logger.info("[%d/%d] judged %s (ok=%s)", i + 1, len(output_df), message_id, record["ok"])
     return result

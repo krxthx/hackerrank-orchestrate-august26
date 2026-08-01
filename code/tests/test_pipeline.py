@@ -89,6 +89,37 @@ def test_content_blocked_decision_is_scam_mute():
     assert "Upstream provider rejected the request." in decision.reason
 
 
+def test_run_pipeline_step_limit_gets_an_honest_fallback_reason(tmp_path, monkeypatch):
+    input_path = tmp_path / "messages.csv"
+    output_path = tmp_path / "output.csv"
+    input_path.write_text(
+        "message_id,user_id,conversation_type,group_id,business_id,sender_user_id,created_at,"
+        "message_text,media_type,media_id,forwarded_count\n"
+        "msg_1,u_001,personal,,,u_002,2026-07-31 10:00,hello,,,0\n"
+    )
+    checkpoint_path = tmp_path / "checkpoint.jsonl"
+
+    monkeypatch.setattr("orchestrate.pipeline._checkpoint_fingerprint", lambda _path: "b" * 64)
+    monkeypatch.setattr("orchestrate.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
+    monkeypatch.setattr("orchestrate.pipeline.build_user_content", lambda _row: "route")
+    monkeypatch.setattr(
+        "orchestrate.pipeline.run_agent",
+        lambda *_args, **_kwargs: AgentResult(
+            final_text="ERROR: exceeded MAX_AGENT_STEPS without a final answer",
+            steps_used=6,
+            hit_step_limit=True,
+        ),
+    )
+
+    run_pipeline(str(input_path), output_path=str(output_path))
+
+    written = pd.read_csv(output_path).iloc[0]
+    assert written["action"] == "digest"
+    assert "step-call limit" not in written["reason"]  # sanity: not a copy-paste typo
+    assert "step" in written["reason"] and "final decision" in written["reason"]
+    assert "could not parse" not in written["reason"]  # must not be mislabeled as a parse failure
+
+
 def test_checkpoint_fingerprint_changes_with_input_content(tmp_path):
     input_path = tmp_path / "messages.csv"
     input_path.write_text("message_id\nmsg_1\n")
