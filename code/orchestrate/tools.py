@@ -36,17 +36,28 @@ class Tool:
 REGISTRY: dict[str, Tool] = {}
 
 
-def tool(description: str):
+def tool(description: str, params: dict[str, str] | None = None):
+    """`params` is an optional {param_name: description} map for per-argument guidance (e.g.
+    "pass empty string if not applicable") that the model sees on each field individually,
+    not just buried in the function-level description.
+    """
+    params = params or {}
+
     def decorator(fn: Callable):
         hints = get_type_hints(fn)
-        params = inspect.signature(fn).parameters
+        sig_params = inspect.signature(fn).parameters
         properties = {}
         required = []
-        for name, param in params.items():
+        for name, param in sig_params.items():
             py_type = hints.get(name, str)
-            properties[name] = {"type": _PY_TO_JSON_TYPE.get(py_type, "string")}
+            prop: dict = {"type": _PY_TO_JSON_TYPE.get(py_type, "string")}
+            if name in params:
+                prop["description"] = params[name]
             if param.default is inspect.Parameter.empty:
                 required.append(name)
+            else:
+                prop["default"] = param.default
+            properties[name] = prop
 
         schema = {
             "type": "function",
@@ -57,6 +68,7 @@ def tool(description: str):
                     "type": "object",
                     "properties": properties,
                     "required": required,
+                    "additionalProperties": False,
                 },
             },
         }
@@ -84,7 +96,8 @@ def _row_to_dict(row: pd.Series) -> dict:
 @tool(
     "Look up a user's notification behavior: quiet hours (do_not_disturb_window) and their "
     "30-day counts of messages opened, replied to, notifications dismissed, and reports filed. "
-    "Call this for the message's receiving user_id before deciding action/confidence."
+    "Call this for the message's receiving user_id before deciding action/confidence.",
+    params={"user_id": "The receiving user's user_id (from the incoming message)."},
 )
 def get_user_profile(user_id: str) -> str:
     ds = get_dataset()
@@ -96,7 +109,11 @@ def get_user_profile(user_id: str) -> str:
 @tool(
     "Look up group info (type, size, admin_count, recent activity) and this specific user's "
     "membership in it (role, mute state, read/reply/dismiss behavior). Call this when "
-    "conversation_type is 'group'."
+    "conversation_type is 'group'.",
+    params={
+        "group_id": "The incoming message's group_id.",
+        "user_id": "The receiving user's user_id.",
+    },
 )
 def get_group_context(group_id: str, user_id: str) -> str:
     ds = get_dataset()
@@ -111,7 +128,11 @@ def get_group_context(group_id: str, user_id: str) -> str:
 @tool(
     "Look up a business account (verification, domain match, account age, report count) and "
     "whether this specific user has a real relationship with it (past orders/bookings, "
-    "opt-in/opt-out of promotions, reply history). Call this when conversation_type is 'business'."
+    "opt-in/opt-out of promotions, reply history). Call this when conversation_type is 'business'.",
+    params={
+        "business_id": "The incoming message's business_id.",
+        "user_id": "The receiving user's user_id.",
+    },
 )
 def get_business_context(business_id: str, user_id: str) -> str:
     ds = get_dataset()
@@ -130,7 +151,14 @@ def get_business_context(business_id: str, user_id: str) -> str:
     "business (pass whichever of sender_user_id/group_id/business_id apply, leave others as "
     "empty string), each annotated with how the user reacted (opened/replied/dismissed/muted/"
     "reported). This is the ONLY valid source for evidence_message_ids in your final answer -- "
-    "never cite a message_id that was not returned by this tool. Returns 'none' if nothing matches."
+    "never cite a message_id that was not returned by this tool. Returns 'none' if nothing matches.",
+    params={
+        "user_id": "The receiving user's user_id.",
+        "sender_user_id": "Filter to this sender only, or '' (empty string) to not filter by sender.",
+        "group_id": "Filter to this group only, or '' (empty string) to not filter by group.",
+        "business_id": "Filter to this business only, or '' (empty string) to not filter by business.",
+        "limit": "Max number of past messages to return, most recent first.",
+    },
 )
 def get_message_history(
     user_id: str,
@@ -171,7 +199,11 @@ def get_message_history(
 @tool(
     "Fetch the receiving user's recent daily notification load (notifications sent vs "
     "dismissed per day). Useful to decide whether a borderline case should be batched into "
-    "digest instead of interrupting, if the user is already getting a lot of notifications."
+    "digest instead of interrupting, if the user is already getting a lot of notifications.",
+    params={
+        "user_id": "The receiving user's user_id.",
+        "days": "How many recent days of load to return.",
+    },
 )
 def get_daily_load(user_id: str, days: int = 7) -> str:
     ds = get_dataset()

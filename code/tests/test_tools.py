@@ -25,6 +25,14 @@ def test_schema_required_fields():
     assert history_required == ["user_id"]
 
 
+def test_schema_carries_per_parameter_descriptions_and_defaults():
+    schemas = {s["function"]["name"]: s for s in tools.all_schemas()}
+    props = schemas["get_message_history"]["function"]["parameters"]["properties"]
+    assert "description" in props["sender_user_id"]
+    assert props["limit"]["default"] == 8
+    assert schemas["get_message_history"]["function"]["parameters"]["additionalProperties"] is False
+
+
 def test_get_user_profile_known_user():
     result = json.loads(tools.call("get_user_profile", {"user_id": "u_001"}))
     assert result["user_id"] == "u_001"
