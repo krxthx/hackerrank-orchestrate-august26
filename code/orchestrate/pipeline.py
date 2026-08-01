@@ -6,11 +6,13 @@ against types.RoutingDecision before being written out.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
 import os
 import re
+from pathlib import Path
 
 import pandas as pd
 from pydantic import ValidationError
@@ -19,11 +21,15 @@ from tenacity import RetryError
 from orchestrate import transcribe
 from orchestrate.agent import run_agent
 from orchestrate.config import (
+    API_BASE,
     DATA_OUTPUT_DIR,
     DATASET_DIR,
+    MODEL,
     ROUTER_MAX_STEPS,
     SEND_AUDIO_INLINE,
     TRANSCRIBE_VOICE_NOTES,
+    WHISPER_COMPUTE_TYPE,
+    WHISPER_MODEL_SIZE,
 )
 from orchestrate.constants import DEFAULT_OUTPUT_FILENAME
 from orchestrate.data import get_dataset
@@ -36,6 +42,30 @@ logger = logging.getLogger(__name__)
 OUTPUT_COLUMNS = ["message_id", "action", "message_type", "reason", "confidence", "evidence_message_ids"]
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+_CHECKPOINT_FINGERPRINT_VERSION = 1
+_CONTEXT_FILENAMES = (
+    "users.csv",
+    "groups.csv",
+    "group_members.csv",
+    "business_accounts.csv",
+    "user_business_history.csv",
+    "message_history.csv",
+    "message_events.csv",
+    "images.csv",
+    "voice_notes.csv",
+    "daily_notification_summary.csv",
+)
+_ROUTING_SOURCE_FILENAMES = (
+    "agent.py",
+    "data.py",
+    "llm.py",
+    "pipeline.py",
+    "tools.py",
+    "transcribe.py",
+    "types.py",
+    os.path.join("prompts", "system.py"),
+)
 
 
 def build_user_content(row: pd.Series) -> str | list[dict]:
@@ -181,9 +211,68 @@ def parse_result(agent_output: str, message_id: str) -> RoutingDecision:
         return _fallback_decision(message_id, f"could not parse a valid routing decision ({exc}).")
 
 
-def _checkpoint_path(input_path: str) -> str:
+def _update_hash_from_file(digest, label: str, path: Path) -> None:
+    """Add a file to a deterministic fingerprint without storing its path or contents."""
+    digest.update(label.encode("utf-8"))
+    digest.update(b"\0")
+    if not path.is_file():
+        digest.update(b"missing\0")
+        return
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    digest.update(b"\0")
+
+
+def _checkpoint_fingerprint(input_path: str) -> str:
+    """Identify everything that can materially change routing decisions.
+
+    The same fingerprint is safe to resume after an interruption. Changes to input/context
+    data, media, routing code/prompt, model endpoint identity, or media-processing settings
+    create a new checkpoint namespace automatically. Secrets, pacing, output paths, and
+    logging settings are deliberately excluded.
+    """
+    digest = hashlib.sha256()
+    settings = {
+        "fingerprint_version": _CHECKPOINT_FINGERPRINT_VERSION,
+        "model": MODEL,
+        "api_base": API_BASE,
+        "router_max_steps": ROUTER_MAX_STEPS,
+        "send_audio_inline": SEND_AUDIO_INLINE,
+        "transcribe_voice_notes": TRANSCRIBE_VOICE_NOTES,
+        "whisper_model_size": WHISPER_MODEL_SIZE,
+        "whisper_compute_type": WHISPER_COMPUTE_TYPE,
+    }
+    digest.update(json.dumps(settings, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(b"\0")
+
+    _update_hash_from_file(digest, "input", Path(input_path))
+    dataset_root = Path(DATASET_DIR)
+    for filename in _CONTEXT_FILENAMES:
+        _update_hash_from_file(digest, f"context:{filename}", dataset_root / filename)
+
+    media_root = dataset_root / "media"
+    if media_root.is_dir():
+        for media_path in sorted(path for path in media_root.rglob("*") if path.is_file()):
+            label = media_path.relative_to(dataset_root).as_posix()
+            _update_hash_from_file(digest, f"media:{label}", media_path)
+    else:
+        digest.update(b"media:missing\0")
+
+    source_root = Path(__file__).resolve().parent
+    for filename in _ROUTING_SOURCE_FILENAMES:
+        _update_hash_from_file(digest, f"source:{filename}", source_root / filename)
+    return digest.hexdigest()
+
+
+def _checkpoint_path(input_path: str, fingerprint: str | None = None) -> str:
     base = os.path.splitext(os.path.basename(input_path))[0]
-    return os.path.join(os.path.dirname(DATA_OUTPUT_DIR), "cache", f"{base}_checkpoint.jsonl")
+    fingerprint = fingerprint or _checkpoint_fingerprint(input_path)
+    return os.path.join(
+        os.path.dirname(DATA_OUTPUT_DIR),
+        "cache",
+        f"{base}_checkpoint_{fingerprint[:12]}.jsonl",
+    )
 
 
 def _load_checkpoint(path: str) -> dict[str, RoutingDecision]:
@@ -204,6 +293,7 @@ def run_pipeline(
     input_path: str = os.path.join(DATASET_DIR, "messages.csv"),
     output_filename: str = DEFAULT_OUTPUT_FILENAME,
     output_path: str | None = None,
+    fresh: bool = False,
 ) -> str:
     """Runs the router agent over every row of input_path. Resumable: each decision is
     appended to a checkpoint file as soon as it's made, so a crash (network blip, provider
@@ -213,14 +303,22 @@ def run_pipeline(
     df = pd.read_csv(input_path)
     run_logger = TranscriptLogger()
 
-    checkpoint_file = _checkpoint_path(input_path)
+    fingerprint = _checkpoint_fingerprint(input_path)
+    checkpoint_file = _checkpoint_path(input_path, fingerprint)
     os.makedirs(os.path.dirname(checkpoint_file), exist_ok=True)
-    checkpoint = _load_checkpoint(checkpoint_file)
+    checkpoint = {} if fresh else _load_checkpoint(checkpoint_file)
+    if fresh and os.path.exists(checkpoint_file):
+        logger.info("fresh run requested; replacing checkpoint %s", checkpoint_file)
     if checkpoint:
-        logger.info("resuming from checkpoint: %d/%d already decided", len(checkpoint), len(df))
+        logger.info(
+            "resuming checkpoint %s: %d/%d already decided",
+            fingerprint[:12],
+            len(checkpoint),
+            len(df),
+        )
 
     decisions: list[RoutingDecision] = []
-    with open(checkpoint_file, "a") as ckpt:
+    with open(checkpoint_file, "w" if fresh else "a") as ckpt:
         for i, row in df.iterrows():
             message_id = row["message_id"]
             if message_id in checkpoint:

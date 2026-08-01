@@ -33,12 +33,17 @@ def main() -> None:
         action="store_true",
         help="Skip writing the extra copy to data/output/output.csv.",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore the matching resumable checkpoint and reroute every input row.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     scratch_path = os.path.join(DATA_OUTPUT_DIR, DEFAULT_OUTPUT_FILENAME)
-    written = run_pipeline(input_path=args.input, output_path=scratch_path)
+    written = run_pipeline(input_path=args.input, output_path=scratch_path, fresh=args.fresh)
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     shutil.copyfile(written, args.output)

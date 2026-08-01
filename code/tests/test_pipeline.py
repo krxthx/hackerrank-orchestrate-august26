@@ -1,10 +1,21 @@
 """Offline tests for pipeline.py's parsing/validation logic -- no live LLM calls."""
 
+import json
+
 import pandas as pd
 import pytest
 from tenacity import RetryError
 
-from orchestrate.pipeline import _content_blocked_decision, _looks_like_content_block, build_user_content, parse_result
+from orchestrate.pipeline import (
+    _checkpoint_fingerprint,
+    _checkpoint_path,
+    _content_blocked_decision,
+    _looks_like_content_block,
+    build_user_content,
+    parse_result,
+    run_pipeline,
+)
+from orchestrate.types import AgentResult
 from orchestrate.types import RoutingDecision
 
 
@@ -95,3 +106,67 @@ def test_content_blocked_decision_is_scam_mute():
     assert decision.action == "mute"
     assert decision.message_type == "scam"
     assert 0 <= decision.confidence <= 1
+
+
+def test_checkpoint_fingerprint_changes_with_input_content(tmp_path):
+    input_path = tmp_path / "messages.csv"
+    input_path.write_text("message_id\nmsg_1\n")
+    first = _checkpoint_fingerprint(str(input_path))
+
+    input_path.write_text("message_id\nmsg_2\n")
+    second = _checkpoint_fingerprint(str(input_path))
+
+    assert first != second
+    assert _checkpoint_path(str(input_path), first).endswith(f"messages_checkpoint_{first[:12]}.jsonl")
+
+
+def test_checkpoint_fingerprint_changes_with_model(tmp_path, monkeypatch):
+    input_path = tmp_path / "messages.csv"
+    input_path.write_text("message_id\nmsg_1\n")
+    first = _checkpoint_fingerprint(str(input_path))
+
+    monkeypatch.setattr("orchestrate.pipeline.MODEL", "different-provider/different-model")
+    second = _checkpoint_fingerprint(str(input_path))
+
+    assert first != second
+
+
+def test_fresh_run_replaces_matching_checkpoint(tmp_path, monkeypatch):
+    input_path = tmp_path / "messages.csv"
+    output_path = tmp_path / "output.csv"
+    input_path.write_text(
+        "message_id,user_id,conversation_type,group_id,business_id,sender_user_id,created_at,"
+        "message_text,media_type,media_id,forwarded_count\n"
+        "msg_1,u_001,personal,,,u_002,2026-07-31 10:00,hello,,,0\n"
+    )
+    checkpoint_path = tmp_path / "checkpoint.jsonl"
+    stale = RoutingDecision(
+        message_id="msg_1",
+        action="mute",
+        message_type="spam",
+        reason="stale",
+        confidence=0.9,
+    )
+    checkpoint_path.write_text(json.dumps(stale.model_dump()) + "\n")
+
+    monkeypatch.setattr("orchestrate.pipeline._checkpoint_fingerprint", lambda _path: "a" * 64)
+    monkeypatch.setattr("orchestrate.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
+    monkeypatch.setattr("orchestrate.pipeline.build_user_content", lambda _row: "route")
+    monkeypatch.setattr(
+        "orchestrate.pipeline.run_agent",
+        lambda *_args, **_kwargs: AgentResult(
+            final_text=(
+                '{"message_id":"msg_1","action":"notify","message_type":"personal",'
+                '"reason":"fresh","confidence":0.8,"evidence_message_ids":"none"}'
+            ),
+            steps_used=1,
+        ),
+    )
+
+    run_pipeline(str(input_path), output_path=str(output_path), fresh=True)
+
+    written = pd.read_csv(output_path).iloc[0]
+    assert written["action"] == "notify"
+    checkpoint_lines = checkpoint_path.read_text().splitlines()
+    assert len(checkpoint_lines) == 1
+    assert json.loads(checkpoint_lines[0])["reason"] == "fresh"
