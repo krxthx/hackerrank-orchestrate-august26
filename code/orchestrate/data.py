@@ -11,6 +11,7 @@ from functools import lru_cache
 import pandas as pd
 
 from orchestrate.config import DATASET_DIR
+from orchestrate.errors import DatasetError
 
 
 class Dataset:
@@ -28,7 +29,16 @@ class Dataset:
         self.daily_notification_summary = self._read("daily_notification_summary.csv")
 
     def _read(self, filename: str) -> pd.DataFrame:
-        return pd.read_csv(os.path.join(self.root, filename))
+        path = os.path.join(self.root, filename)
+        if not os.path.exists(path):
+            raise DatasetError(f"Required dataset file is missing: {path}. Check DATASET_DIR in config.py.")
+        try:
+            df = pd.read_csv(path)
+        except pd.errors.EmptyDataError as exc:
+            raise DatasetError(f"Dataset file is empty or unreadable: {path}.", cause=exc) from exc
+        if df.empty:
+            raise DatasetError(f"Dataset file has no rows: {path}.")
+        return df
 
     def media_path(self, media_type: str, media_id: str) -> str | None:
         if media_type == "image" and media_id in self.images.index:

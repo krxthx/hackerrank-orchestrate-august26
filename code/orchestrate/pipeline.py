@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pandas as pd
 from pydantic import ValidationError
-from tenacity import RetryError
 
 from orchestrate import transcribe
 from orchestrate.agent import run_agent
@@ -33,6 +32,7 @@ from orchestrate.config import (
 )
 from orchestrate.constants import DEFAULT_OUTPUT_FILENAME
 from orchestrate.data import get_dataset
+from orchestrate.errors import ContentFilterBlockedError, DatasetError, classify_llm_error, describe_parse_error
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT
 from orchestrate.transcript import TranscriptLogger
 from orchestrate.types import RoutingDecision
@@ -158,27 +158,7 @@ def _fallback_decision(message_id: str, reason: str) -> RoutingDecision:
     )
 
 
-_CONTENT_BLOCK_SIGNALS = ("403", "forbidden", "content_filter", "content policy", "blocked")
-
-
-def _root_exception(exc: BaseException) -> BaseException:
-    """Unwrap tenacity's RetryError to the actual underlying exception it gave up on."""
-    if isinstance(exc, RetryError) and exc.last_attempt is not None:
-        inner = exc.last_attempt.exception()
-        if inner is not None:
-            return inner
-    return exc
-
-
-def _looks_like_content_block(exc: BaseException) -> bool:
-    """Heuristic: does this failure look like an upstream safety/content filter rejecting
-    the request (as opposed to a network blip, rate limit, or other transient error)?
-    """
-    text = str(_root_exception(exc)).lower()
-    return any(signal in text for signal in _CONTENT_BLOCK_SIGNALS)
-
-
-def _content_blocked_decision(message_id: str) -> RoutingDecision:
+def _content_blocked_decision(message_id: str, detail: str) -> RoutingDecision:
     """A request that the upstream provider/proxy itself refuses to process is, in this
     domain, informative: content that trips a safety/content filter is itself a signal of
     phishing/scam-style material. Treat the block as evidence rather than discarding it into
@@ -189,9 +169,8 @@ def _content_blocked_decision(message_id: str) -> RoutingDecision:
         action="mute",
         message_type="scam",
         reason=(
-            "The message content was rejected by an upstream safety/content filter before "
-            "a routing decision could be generated -- itself a strong signal of phishing or "
-            "scam-style content, so this is muted as a precaution rather than left unrouted."
+            f"{detail} -- itself a strong signal of phishing or scam-style content, so this "
+            "is muted as a precaution rather than left unrouted."
         ),
         confidence=0.6,
         evidence_message_ids="none",
@@ -208,7 +187,7 @@ def parse_result(agent_output: str, message_id: str) -> RoutingDecision:
         return RoutingDecision(**payload)
     except (ValueError, ValidationError, json.JSONDecodeError) as exc:
         logger.warning("failed to parse routing decision for %s: %s", message_id, exc)
-        return _fallback_decision(message_id, f"could not parse a valid routing decision ({exc}).")
+        return _fallback_decision(message_id, describe_parse_error(exc))
 
 
 def _update_hash_from_file(digest, label: str, path: Path) -> None:
@@ -300,7 +279,12 @@ def run_pipeline(
     outage, etc) only costs the one in-flight row, not the whole batch -- rerunning picks up
     where it left off instead of re-calling the LLM for already-decided messages.
     """
-    df = pd.read_csv(input_path)
+    if not os.path.exists(input_path):
+        raise DatasetError(f"Input file not found: {input_path}.")
+    try:
+        df = pd.read_csv(input_path)
+    except pd.errors.EmptyDataError as exc:
+        raise DatasetError(f"Input file is empty or unreadable: {input_path}.", cause=exc) from exc
     run_logger = TranscriptLogger()
 
     fingerprint = _checkpoint_fingerprint(input_path)
@@ -333,13 +317,19 @@ def run_pipeline(
                         max_steps=ROUTER_MAX_STEPS,
                     )
                     decision = parse_result(result.final_text, message_id)
+                except DatasetError:
+                    # Fatal -- a missing/malformed dataset file will fail identically on
+                    # every remaining row, so stop the batch instead of silently
+                    # fallback-ing through all of it.
+                    raise
                 except Exception as exc:  # a single message's total failure shouldn't kill the batch
-                    if _looks_like_content_block(exc):
-                        logger.warning("agent run for %s blocked upstream, treating as scam signal: %s", message_id, exc)
-                        decision = _content_blocked_decision(message_id)
+                    err = classify_llm_error(exc)
+                    if isinstance(err, ContentFilterBlockedError):
+                        logger.warning("agent run for %s blocked upstream, treating as scam signal: %s", message_id, err)
+                        decision = _content_blocked_decision(message_id, err.user_message)
                     else:
-                        logger.warning("agent run failed for %s, using fallback: %s", message_id, exc)
-                        decision = _fallback_decision(message_id, f"agent run failed ({exc}).")
+                        logger.warning("agent run failed for %s, using fallback: %s", message_id, err)
+                        decision = _fallback_decision(message_id, err.user_message)
                 ckpt.write(json.dumps(decision.model_dump()) + "\n")
                 ckpt.flush()
 

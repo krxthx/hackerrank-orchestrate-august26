@@ -20,6 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from orchestrate.config import DATA_OUTPUT_DIR, JUDGE_MODEL  # noqa: E402
+from orchestrate.errors import fatal_error_boundary  # noqa: E402
 from orchestrate.evaluate import run_judge_eval, run_sample_eval, write_report  # noqa: E402
 
 
@@ -35,18 +36,21 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    sample_result = run_sample_eval(limit=args.limit) if args.mode in ("sample", "all") else None
-    judge_result = run_judge_eval(judge_model=args.judge_model, limit=args.limit) if args.mode in ("judge", "all") else None
+    with fatal_error_boundary():
+        sample_result = run_sample_eval(limit=args.limit) if args.mode in ("sample", "all") else None
+        judge_result = (
+            run_judge_eval(judge_model=args.judge_model, limit=args.limit) if args.mode in ("judge", "all") else None
+        )
 
-    write_report(sample_result, judge_result, args.report)
-    print(f"\nWrote {args.report}\n")
+        write_report(sample_result, judge_result, args.report)
+        print(f"\nWrote {args.report}\n")
 
-    if sample_result is not None:
-        print("== sample_eval (vs dataset/sample_messages.csv) ==")
-        print(json.dumps(sample_result.summary(), indent=2))
-    if judge_result is not None:
-        print("\n== judge_eval (rubric judge over dataset/output.csv) ==")
-        print(json.dumps(judge_result.summary(), indent=2))
+        if sample_result is not None:
+            print("== sample_eval (vs dataset/sample_messages.csv) ==")
+            print(json.dumps(sample_result.summary(), indent=2))
+        if judge_result is not None:
+            print("\n== judge_eval (rubric judge over dataset/output.csv) ==")
+            print(json.dumps(judge_result.summary(), indent=2))
 
 
 if __name__ == "__main__":

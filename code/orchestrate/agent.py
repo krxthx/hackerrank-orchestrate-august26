@@ -11,6 +11,7 @@ import json
 from orchestrate import tools
 from orchestrate.config import MAX_AGENT_STEPS
 from orchestrate.constants import ASSISTANT_ROLE, SYSTEM_ROLE, TOOL_ROLE, USER_ROLE
+from orchestrate.errors import OrchestrateError
 from orchestrate.llm import complete
 from orchestrate.transcript import TranscriptLogger
 from orchestrate.types import AgentResult
@@ -51,7 +52,12 @@ def run_agent(
             args = json.loads(tc.function.arguments)
             try:
                 result = tools.call(tc.function.name, args)
-            except Exception as exc:  # surfaced to the model, not swallowed silently
+            except OrchestrateError:
+                # Fatal, not a per-call fluke (e.g. a dataset file is missing/malformed) --
+                # every future call would fail the same way, so stop the run instead of
+                # letting the model burn through MAX_AGENT_STEPS retrying uselessly.
+                raise
+            except Exception as exc:  # a genuine tool bug/bad args -- surfaced to the model, not fatal
                 result = f"ERROR: {exc}"
             messages.append(
                 {

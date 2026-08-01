@@ -33,6 +33,7 @@ from orchestrate.agent import run_agent
 from orchestrate.config import DATASET_DIR, JUDGE_API_BASE, JUDGE_API_KEY, JUDGE_MODEL, ROUTER_MAX_STEPS
 from orchestrate.constants import SYSTEM_ROLE, USER_ROLE
 from orchestrate.data import get_dataset
+from orchestrate.errors import DatasetError, DecisionParseError, OrchestrateError, classify_llm_error, describe_parse_error
 from orchestrate.llm import complete
 from orchestrate.pipeline import build_user_content, parse_result
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT
@@ -92,12 +93,17 @@ class SampleEvalResult:
     def summary(self) -> dict:
         if not self.rows:
             return {"n": 0}
-        action_acc = sum(r["action_correct"] for r in self.rows) / self.n
-        type_acc = sum(r["message_type_correct"] for r in self.rows) / self.n
-        evidence_overlap = sum(r["evidence_overlap"] for r in self.rows) / self.n
-        brier = sum((r["confidence"] - r["action_correct"]) ** 2 for r in self.rows) / self.n
+        scored = [r for r in self.rows if r.get("ok", True)]
+        if not scored:
+            return {"n": self.n, "scored": 0, "errors": self.n}
+        action_acc = sum(r["action_correct"] for r in scored) / len(scored)
+        type_acc = sum(r["message_type_correct"] for r in scored) / len(scored)
+        evidence_overlap = sum(r["evidence_overlap"] for r in scored) / len(scored)
+        brier = sum((r["confidence"] - r["action_correct"]) ** 2 for r in scored) / len(scored)
         return {
             "n": self.n,
+            "scored": len(scored),
+            "errors": self.n - len(scored),
             "action_accuracy": round(action_acc, 3),
             "message_type_accuracy": round(type_acc, 3),
             "evidence_overlap_mean": round(evidence_overlap, 3),
@@ -114,40 +120,55 @@ def run_sample_eval(
     labels -- only INPUT_COLUMNS are shown to it) and scores the predictions against the
     labels that ship with the file.
     """
-    df = pd.read_csv(sample_path)
+    if not os.path.exists(sample_path):
+        raise DatasetError(f"Sample eval input not found: {sample_path}.")
+    try:
+        df = pd.read_csv(sample_path)
+    except pd.errors.EmptyDataError as exc:
+        raise DatasetError(f"Sample eval input is empty or unreadable: {sample_path}.", cause=exc) from exc
     if limit:
         df = df.head(limit)
 
     result = SampleEvalResult()
     for i, row in df.iterrows():
-        input_row = row[[c for c in INPUT_COLUMNS if c in row.index]]
-        content = build_user_content(input_row)
-        agent_result = run_agent(DEFAULT_SYSTEM_PROMPT, content, max_steps=max_steps)
-        prediction = parse_result(agent_result.final_text, row["message_id"])
+        message_id = row["message_id"]
+        try:
+            input_row = row[[c for c in INPUT_COLUMNS if c in row.index]]
+            content = build_user_content(input_row)
+            agent_result = run_agent(DEFAULT_SYSTEM_PROMPT, content, max_steps=max_steps)
+            prediction = parse_result(agent_result.final_text, message_id)
 
-        expected_evidence = _evidence_set(row.get("evidence_message_ids"))
-        record = {
-            "message_id": row["message_id"],
-            "predicted_action": prediction.action,
-            "expected_action": row["action"],
-            "action_correct": prediction.action == row["action"],
-            "predicted_message_type": prediction.message_type,
-            "expected_message_type": row["message_type"],
-            "message_type_correct": prediction.message_type == row["message_type"],
-            "confidence": prediction.confidence,
-            "evidence_overlap": _evidence_overlap(prediction.evidence_message_ids, expected_evidence),
-        }
+            expected_evidence = _evidence_set(row.get("evidence_message_ids"))
+            record = {
+                "message_id": message_id,
+                "ok": True,
+                "predicted_action": prediction.action,
+                "expected_action": row["action"],
+                "action_correct": prediction.action == row["action"],
+                "predicted_message_type": prediction.message_type,
+                "expected_message_type": row["message_type"],
+                "message_type_correct": prediction.message_type == row["message_type"],
+                "confidence": prediction.confidence,
+                "evidence_overlap": _evidence_overlap(prediction.evidence_message_ids, expected_evidence),
+            }
+            logger.info(
+                "[%d/%d] %s action=%s(expected %s) type=%s(expected %s)",
+                i + 1,
+                len(df),
+                message_id,
+                prediction.action,
+                row["action"],
+                prediction.message_type,
+                row["message_type"],
+            )
+        except DatasetError:
+            # Fatal -- would fail identically on every remaining row.
+            raise
+        except Exception as exc:  # a single sample row's failure shouldn't kill the whole eval run
+            err = classify_llm_error(exc)
+            logger.warning("sample eval failed for %s, skipping: %s", message_id, err)
+            record = {"message_id": message_id, "ok": False, "error": err.user_message}
         result.rows.append(record)
-        logger.info(
-            "[%d/%d] %s action=%s(expected %s) type=%s(expected %s)",
-            i + 1,
-            len(df),
-            row["message_id"],
-            prediction.action,
-            row["action"],
-            prediction.message_type,
-            row["message_type"],
-        )
     return result
 
 
@@ -233,9 +254,15 @@ def _judge_one(context_json: str, judge_model: str) -> dict:
         {"role": SYSTEM_ROLE, "content": JUDGE_SYSTEM_PROMPT},
         {"role": USER_ROLE, "content": context_json},
     ]
-    response = complete(messages, model=judge_model, api_base=JUDGE_API_BASE, api_key=JUDGE_API_KEY)
+    try:
+        response = complete(messages, model=judge_model, api_base=JUDGE_API_BASE, api_key=JUDGE_API_KEY)
+    except Exception as exc:
+        raise classify_llm_error(exc) from exc
     text = response.choices[0].message.content or ""
-    return _extract_json(text)
+    try:
+        return _extract_json(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise DecisionParseError(describe_parse_error(exc), cause=exc) from exc
 
 
 def run_judge_eval(
@@ -244,8 +271,14 @@ def run_judge_eval(
     judge_model: str = JUDGE_MODEL,
     limit: int | None = None,
 ) -> JudgeEvalResult:
-    messages_df = pd.read_csv(messages_path).set_index("message_id", drop=False)
-    output_df = pd.read_csv(output_path)
+    for path in (messages_path, output_path):
+        if not os.path.exists(path):
+            raise DatasetError(f"Judge eval input not found: {path}.")
+    try:
+        messages_df = pd.read_csv(messages_path).set_index("message_id", drop=False)
+        output_df = pd.read_csv(output_path)
+    except pd.errors.EmptyDataError as exc:
+        raise DatasetError(f"Judge eval input is empty or unreadable: {exc}.", cause=exc) from exc
     if limit:
         output_df = output_df.head(limit)
 
@@ -270,9 +303,12 @@ def run_judge_eval(
                 "safety_concern": bool(verdict.get("safety_concern", False)),
                 "critique": verdict.get("critique", ""),
             }
-        except (ValueError, ValidationError, json.JSONDecodeError, KeyError) as exc:
+        except OrchestrateError as exc:
             logger.warning("judge failed to score %s: %s", message_id, exc)
-            record = {"message_id": message_id, "ok": False, "error": str(exc)}
+            record = {"message_id": message_id, "ok": False, "error": exc.user_message}
+        except (ValidationError, KeyError) as exc:
+            logger.warning("judge returned a malformed verdict for %s: %s", message_id, exc)
+            record = {"message_id": message_id, "ok": False, "error": describe_parse_error(exc)}
         result.rows.append(record)
         logger.info("[%d/%d] judged %s (ok=%s)", i + 1, len(output_df), message_id, record["ok"])
     return result

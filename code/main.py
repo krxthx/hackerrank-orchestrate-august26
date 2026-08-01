@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from orchestrate.config import DATA_OUTPUT_DIR, DATASET_DIR  # noqa: E402
 from orchestrate.constants import DEFAULT_OUTPUT_FILENAME  # noqa: E402
+from orchestrate.errors import fatal_error_boundary  # noqa: E402
 from orchestrate.pipeline import run_pipeline  # noqa: E402
 
 
@@ -42,15 +43,16 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    scratch_path = os.path.join(DATA_OUTPUT_DIR, DEFAULT_OUTPUT_FILENAME)
-    written = run_pipeline(input_path=args.input, output_path=scratch_path, fresh=args.fresh)
+    with fatal_error_boundary():
+        scratch_path = os.path.join(DATA_OUTPUT_DIR, DEFAULT_OUTPUT_FILENAME)
+        written = run_pipeline(input_path=args.input, output_path=scratch_path, fresh=args.fresh)
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    shutil.copyfile(written, args.output)
-    print(f"Wrote {args.output}" + ("" if args.no_scratch_copy else f" (scratch copy: {written})"))
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        shutil.copyfile(written, args.output)
+        print(f"Wrote {args.output}" + ("" if args.no_scratch_copy else f" (scratch copy: {written})"))
 
-    if args.no_scratch_copy and os.path.abspath(written) != os.path.abspath(args.output):
-        os.remove(written)
+        if args.no_scratch_copy and os.path.abspath(written) != os.path.abspath(args.output):
+            os.remove(written)
 
 
 if __name__ == "__main__":
