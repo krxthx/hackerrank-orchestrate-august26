@@ -2,9 +2,18 @@
 
 import pandas as pd
 import pytest
+from tenacity import RetryError
 
-from orchestrate.pipeline import build_user_content, parse_result
+from orchestrate.pipeline import _content_blocked_decision, _looks_like_content_block, build_user_content, parse_result
 from orchestrate.types import RoutingDecision
+
+
+class _FakeFuture:
+    def __init__(self, exc: BaseException):
+        self._exc = exc
+
+    def exception(self):
+        return self._exc
 
 
 def test_parse_result_valid_json():
@@ -69,3 +78,20 @@ def test_build_user_content_text_only_returns_string():
     content = build_user_content(row)
     assert isinstance(content, str)
     assert "msg_100" in content
+
+
+def test_looks_like_content_block_detects_403_forbidden():
+    exc = RetryError(_FakeFuture(Exception("APIError: OpenAIException - 403 Forbidden")))
+    assert _looks_like_content_block(exc)
+
+
+def test_looks_like_content_block_ignores_unrelated_errors():
+    exc = RetryError(_FakeFuture(Exception("Connection timed out")))
+    assert not _looks_like_content_block(exc)
+
+
+def test_content_blocked_decision_is_scam_mute():
+    decision = _content_blocked_decision("msg_065")
+    assert decision.action == "mute"
+    assert decision.message_type == "scam"
+    assert 0 <= decision.confidence <= 1
