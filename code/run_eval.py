@@ -30,6 +30,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows.")
     parser.add_argument("--judge-model", default=JUDGE_MODEL, help="litellm model string for the judge pass.")
     parser.add_argument(
+        "--no-independent-opinion",
+        action="store_true",
+        help="Skip the judge's blind second routing pass (faster/cheaper, but the judge only "
+        "critiques the router's presented decision instead of comparing it to its own).",
+    )
+    parser.add_argument(
         "--report", default=os.path.join(DATA_OUTPUT_DIR, "eval_report.json"), help="Where to write the JSON report."
     )
     args = parser.parse_args()
@@ -39,7 +45,13 @@ def main() -> None:
     with fatal_error_boundary():
         sample_result = run_sample_eval(limit=args.limit) if args.mode in ("sample", "all") else None
         judge_result = (
-            run_judge_eval(judge_model=args.judge_model, limit=args.limit) if args.mode in ("judge", "all") else None
+            run_judge_eval(
+                judge_model=args.judge_model,
+                limit=args.limit,
+                independent_opinion=not args.no_independent_opinion,
+            )
+            if args.mode in ("judge", "all")
+            else None
         )
 
         write_report(sample_result, judge_result, args.report)

@@ -22,9 +22,16 @@ def run_agent(
     user_input: str | list[dict],
     logger: TranscriptLogger | None = None,
     max_steps: int | None = None,
+    model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
 ) -> AgentResult:
     """`user_input` may be a plain string or a list of OpenAI-style content blocks
     (e.g. `[{"type": "text", ...}, {"type": "image_url", ...}]`) for multimodal input.
+
+    `model`/`api_base`/`api_key` default to the router's configured model (see llm.complete)
+    -- pass them explicitly to run this same tool-calling loop against a different model, e.g.
+    evaluate.py using the judge model to form an independent routing opinion.
     """
     logger = logger or TranscriptLogger()
     max_steps = max_steps or MAX_AGENT_STEPS
@@ -34,7 +41,7 @@ def run_agent(
     ]
 
     for step in range(1, max_steps + 1):
-        response = complete(messages, tools=tools.all_schemas())
+        response = complete(messages, tools=tools.all_schemas(), model=model, api_base=api_base, api_key=api_key)
         choice = response.choices[0].message
         tool_calls = choice.tool_calls or []
 

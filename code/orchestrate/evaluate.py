@@ -18,6 +18,15 @@ Two independent passes, since no hidden ground truth is available before submiss
    evidence_message_ids) but not a "correct answer" -- it grades plausibility, not exact match.
    Uses a separate JUDGE_MODEL (litellm-agnostic, configurable via env) so grading isn't
    done by the same model/provider that made the decisions.
+
+   Before grading, `_independent_route` gives the judge model a second, blind pass at the
+   *same* message -- its own full tool-calling run through DEFAULT_SYSTEM_PROMPT, never shown
+   the router's actual decision. Only the resulting action/message_type/confidence are then
+   handed to the rubric-grading call alongside the router's decision. This exists because a
+   judge asked to critique an answer already placed in front of it tends to rate it
+   charitably (confirmation bias); an independently-formed opinion, computed and compared
+   programmatically (`agrees_with_independent`), is a sturdier signal than the judge's own
+   self-reported agreement would be.
 """
 
 import json
@@ -46,7 +55,7 @@ from orchestrate.parsing import extract_json_object
 from orchestrate.pipeline import build_user_content, parse_result
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT
 from orchestrate.tools import get_business_context, get_group_context, get_user_profile
-from orchestrate.types import JudgeVerdict
+from orchestrate.types import JudgeVerdict, RoutingDecision
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +179,42 @@ def run_sample_eval(
 # ---------------------------------------------------------------------------
 
 
-def _build_judge_context(message_row: pd.Series, decision_row: pd.Series) -> str:
+def _independent_route(
+    message_row: pd.Series,
+    judge_model: str,
+    max_steps: int = ROUTER_MAX_STEPS,
+) -> RoutingDecision | None:
+    """A second, blind opinion: re-route this exact message from scratch through the judge
+    model, using the same system prompt and tools as the real router, but never shown the
+    router's actual decision. Returns None if the run hits its step ceiling without a
+    parseable answer -- an unreliable opinion is worth discarding, not forcing into the
+    comparison.
+    """
+    input_row = message_row[[c for c in INPUT_COLUMNS if c in message_row.index]]
+    content = build_user_content(input_row)
+    result = run_agent(
+        DEFAULT_SYSTEM_PROMPT,
+        content,
+        max_steps=max_steps,
+        model=judge_model,
+        api_base=JUDGE_API_BASE,
+        api_key=JUDGE_API_KEY,
+    )
+    if result.hit_step_limit:
+        logger.warning(
+            "independent re-route hit step limit for %s: %s",
+            message_row["message_id"],
+            describe_step_limit(max_steps),
+        )
+        return None
+    return parse_result(result.final_text, message_row["message_id"])
+
+
+def _build_judge_context(
+    message_row: pd.Series,
+    decision_row: pd.Series,
+    independent: RoutingDecision | None = None,
+) -> str:
     """Same context signals the router had access to, plus the real content behind any
     cited evidence_message_ids, so the judge can verify relevance rather than trust it.
     """
@@ -198,6 +242,18 @@ def _build_judge_context(message_row: pd.Series, decision_row: pd.Series) -> str
         context["cited_evidence"] = cited
         context["evidence_ids_verified"] = sorted(r["message_id"] for r in cited) == sorted(evidence_ids)
 
+    if independent is not None:
+        context["independent_opinion"] = {
+            "action": independent.action,
+            "message_type": independent.message_type,
+            "confidence": independent.confidence,
+        }
+        context["independent_opinion_note"] = (
+            "Formed by an agent that independently re-routed this message from scratch, "
+            "blind to the decision above, using the same tools. A second data point, not "
+            "ground truth -- it can be wrong too."
+        )
+
     return json.dumps(context, indent=2, default=str)
 
 
@@ -215,7 +271,8 @@ class JudgeEvalResult:
         scored = [r for r in self.rows if r.get("ok")]
         if not scored:
             return {"n": self.n, "scored": 0, "errors": self.n}
-        return {
+        with_independent = [r for r in scored if r.get("agrees_with_independent") is not None]
+        summary = {
             "n": self.n,
             "scored": len(scored),
             "errors": self.n - len(scored),
@@ -229,6 +286,15 @@ class JudgeEvalResult:
                 r["message_id"] for r in scored if r["reason_score"] <= 2 or r["evidence_score"] <= 2 or r["safety_concern"]
             ],
         }
+        if with_independent:
+            summary["independent_opinion_formed"] = len(with_independent)
+            summary["independent_agreement_rate"] = round(
+                sum(r["agrees_with_independent"] for r in with_independent) / len(with_independent), 3
+            )
+            summary["independent_disagreement_message_ids"] = [
+                r["message_id"] for r in with_independent if not r["agrees_with_independent"]
+            ]
+        return summary
 
 
 def _judge_one(context_json: str, judge_model: str) -> JudgeVerdict:
@@ -253,7 +319,12 @@ def run_judge_eval(
     output_path: str = os.path.join(DATASET_DIR, "output.csv"),
     judge_model: str = JUDGE_MODEL,
     limit: int | None = None,
+    independent_opinion: bool = True,
 ) -> JudgeEvalResult:
+    """`independent_opinion` controls whether each row also gets a blind second routing pass
+    (see `_independent_route`) before grading. Costs one extra full agent run per row, so it
+    can be disabled (e.g. for a fast smoke test) without touching the rubric-grading path.
+    """
     for path in (messages_path, output_path):
         if not os.path.exists(path):
             raise DatasetError(f"Judge eval input not found: {path}.")
@@ -272,7 +343,16 @@ def run_judge_eval(
             logger.warning("skipping %s: not found in %s", message_id, messages_path)
             continue
         message_row = messages_df.loc[message_id]
-        context_json = _build_judge_context(message_row, decision_row)
+
+        independent = None
+        if independent_opinion:
+            try:
+                independent = _independent_route(message_row, judge_model)
+            except Exception as exc:  # a failed second opinion shouldn't block grading the first
+                err = classify_llm_error(exc)
+                logger.warning("independent re-route failed for %s, grading without it: %s", message_id, err)
+
+        context_json = _build_judge_context(message_row, decision_row, independent)
         try:
             verdict = _judge_one(context_json, judge_model)
             record = {
@@ -285,6 +365,8 @@ def run_judge_eval(
                 "confidence_score": verdict.confidence_score,
                 "safety_concern": verdict.safety_concern,
                 "critique": verdict.critique,
+                "independent_action": independent.action if independent else None,
+                "agrees_with_independent": (independent.action == decision_row["action"]) if independent else None,
             }
         except OrchestrateError as exc:
             # Covers both LLM-call failures (classify_llm_error) and a malformed verdict
