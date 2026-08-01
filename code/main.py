@@ -23,6 +23,7 @@ from orchestrate.config import DATA_OUTPUT_DIR, DATASET_DIR  # noqa: E402
 from orchestrate.constants import DEFAULT_OUTPUT_FILENAME  # noqa: E402
 from orchestrate.errors import fatal_error_boundary  # noqa: E402
 from orchestrate.pipeline import run_pipeline  # noqa: E402
+from orchestrate.validate import validate_output  # noqa: E402
 
 
 def main() -> None:
@@ -39,6 +40,11 @@ def main() -> None:
         action="store_true",
         help="Ignore the matching resumable checkpoint and reroute every input row.",
     )
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="Skip the post-run output validation pass.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,6 +59,15 @@ def main() -> None:
 
         if args.no_scratch_copy and os.path.abspath(written) != os.path.abspath(args.output):
             os.remove(written)
+
+        if not args.no_validate:
+            report = validate_output(args.input, args.output)
+            if report.ok:
+                print(f"Validation OK: {report.output_count} rows, no issues found.")
+            else:
+                print(f"Validation found {len(report.issues)} issue(s) in {report.output_count} rows:")
+                for issue in report.issues:
+                    print(f"  - {issue.message_id}: {issue.problem}")
 
 
 if __name__ == "__main__":
