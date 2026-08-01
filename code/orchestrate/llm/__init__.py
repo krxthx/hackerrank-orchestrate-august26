@@ -1,19 +1,16 @@
-"""Thin, provider-agnostic chat wrapper.
+"""Provider-agnostic chat facade: agent.py and evaluate.py both call complete() without
+knowing or caring which vendor adapter (see llm/providers/) actually handles the request
+-- that's picked automatically via llm.registry.get_provider() from the model string.
 
-Built on litellm so the same code path works against Anthropic, Gemini,
-OpenAI, or a local model served through Ollama -- just change MODEL in
-config.py (or the ORCHESTRATE_MODEL env var) once you know what the
-challenge needs.
+Built on litellm so the same code path works against Anthropic, Gemini, OpenAI-compatible
+endpoints (including OpenRouter), or a local model served through Ollama -- just change
+MODEL in config.py (or the ORCHESTRATE_MODEL env var).
 """
 
-import time
-
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-from orchestrate.config import API_BASE, API_KEY, LLM_CALL_PACING_SECONDS, MODEL
+from orchestrate.config import API_BASE, API_KEY, MODEL
+from orchestrate.llm.registry import get_provider
 
 
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=5, max=90))
 def complete(
     messages: list[dict],
     *,
@@ -30,29 +27,24 @@ def complete(
     `tools` follows the OpenAI tool-calling schema (litellm translates this
     for whichever provider is configured).
 
-    Pass `model="openai/<name>"` with `ORCHESTRATE_API_BASE`/`ORCHESTRATE_API_KEY` set (or
-    `api_base=`/`api_key=` here) to point at any OpenAI-compatible endpoint instead of a
-    named provider.
-
     The ORCHESTRATE_API_BASE/API_KEY fallback only applies when `model` is left unset (i.e.
     this call is using the default router model/endpoint). Callers that pass an explicit
     `model` (e.g. evaluate.py's judge pass, which deliberately uses a different
     model/provider from the router) get exactly the api_base/api_key they passed -- even if
     that's None -- so a differently-configured call never silently rides on the router's
-    endpoint/credentials.
+    endpoint/credentials. (This is the exact bug that once sent the judge's OpenRouter key
+    to the router's internal proxy -- see the adapter's own resolve_api_base/resolve_api_key
+    hooks in llm/base.py for where per-vendor defaults, if any, are applied instead.)
     """
-    import litellm
-
-    if LLM_CALL_PACING_SECONDS > 0:
-        time.sleep(LLM_CALL_PACING_SECONDS)
-
+    resolved_model = model or MODEL
     resolved_api_base = api_base if model else (api_base or API_BASE)
     resolved_api_key = api_key if model else (api_key or API_KEY)
 
-    return litellm.completion(
-        model=model or MODEL,
-        messages=messages,
+    provider = get_provider(resolved_model)
+    return provider.complete(
+        messages,
         tools=tools,
+        model=resolved_model,
         api_base=resolved_api_base,
         api_key=resolved_api_key,
         **kwargs,
