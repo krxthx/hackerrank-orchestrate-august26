@@ -186,9 +186,11 @@ def _independent_route(
 ) -> RoutingDecision | None:
     """A second, blind opinion: re-route this exact message from scratch through the judge
     model, using the same system prompt and tools as the real router, but never shown the
-    router's actual decision. Returns None if the run hits its step ceiling without a
-    parseable answer -- an unreliable opinion is worth discarding, not forcing into the
-    comparison.
+    router's actual decision. Returns None if the run hits its step ceiling, or its final
+    answer doesn't parse, rather than parse_result's usual behavior of masking either case
+    behind a generic low-confidence decision -- a placeholder opinion here would silently
+    count as a real "disagreement" against the router in run_judge_eval's comparison, which
+    is worse than just having no opinion.
     """
     input_row = message_row[[c for c in INPUT_COLUMNS if c in message_row.index]]
     content = build_user_content(input_row)
@@ -207,7 +209,17 @@ def _independent_route(
             describe_step_limit(max_steps),
         )
         return None
-    return parse_result(result.final_text, message_row["message_id"])
+    try:
+        payload = extract_json_object(result.final_text, label="independent opinion")
+        payload.setdefault("message_id", message_row["message_id"])
+        return RoutingDecision(**payload)
+    except (ValueError, ValidationError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "independent re-route for %s produced an unparseable answer, discarding: %s",
+            message_row["message_id"],
+            describe_parse_error(exc),
+        )
+        return None
 
 
 def _build_judge_context(

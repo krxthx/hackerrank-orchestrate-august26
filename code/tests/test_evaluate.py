@@ -144,6 +144,20 @@ def test_independent_route_returns_none_on_step_limit(monkeypatch):
     assert _independent_route(_message_row(), "judge-model") is None
 
 
+def test_independent_route_returns_none_on_unparseable_answer(monkeypatch):
+    """A blank/garbled final answer must not silently become a generic fallback decision --
+    that would masquerade as a real independent opinion and pollute the agreement comparison
+    in run_judge_eval (this is exactly what happened for msg_048 in a live run before this
+    was fixed: an empty response became a spurious 'digest' opinion counted as a disagreement).
+    """
+    monkeypatch.setattr("orchestrate.evaluate.build_user_content", lambda _row: "route")
+    monkeypatch.setattr(
+        "orchestrate.evaluate.run_agent",
+        lambda *_args, **_kwargs: AgentResult(final_text="", steps_used=1),
+    )
+    assert _independent_route(_message_row(), "judge-model") is None
+
+
 def test_independent_route_never_sees_router_decision(monkeypatch):
     """The independent opinion must come from a fresh agent run over the raw message alone --
     it must not be handed the router's decision anywhere in its input.
