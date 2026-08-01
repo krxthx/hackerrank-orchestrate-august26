@@ -141,13 +141,45 @@ flowchart TD
 | [`orchestrate/data.py`](code/orchestrate/data.py) | Loads all dataset CSVs once, indexes them for fast lookups |
 | [`orchestrate/prompts/`](code/orchestrate/prompts) | System prompt encoding the routing policy |
 | [`orchestrate/types.py`](code/orchestrate/types.py) | Pydantic schemas — `RoutingDecision` matches `output.csv` exactly |
-| [`orchestrate/llm.py`](code/orchestrate/llm.py) | Thin `litellm` wrapper — swap providers via one env var |
+| [`orchestrate/llm/`](code/orchestrate/llm) | Provider-adapter package — see [LLM providers](#llm-providers) below |
 | [`orchestrate/transcribe.py`](code/orchestrate/transcribe.py) | Local `faster-whisper` transcription for voice notes |
 | [`orchestrate/transcript.py`](code/orchestrate/transcript.py) | Logs every agent step to `transcripts/` (the graded chat-transcript artifact) |
 | [`orchestrate/config.py`](code/orchestrate/config.py) | All env-tunable settings (model, step limits, pacing, media flags) |
 | [`orchestrate/evaluate.py`](code/orchestrate/evaluate.py) | Eval pipeline: sample-set hard metrics + rubric-judge pass (see [Evaluation](#evaluation)) |
 | [`code/run_eval.py`](code/run_eval.py) | CLI entry point for `evaluate.py` |
 | [`orchestrate/errors.py`](code/orchestrate/errors.py) | Central error types + classification (see [Error handling](#error-handling)) |
+
+## LLM providers
+
+[`orchestrate/llm/`](code/orchestrate/llm) is a small adapter layer over `litellm`, not a
+single wrapper function:
+
+- **`llm/base.py`** — the `LLMProvider` interface every adapter implements. Shared logic
+  (call pacing, retry/backoff, the actual `litellm.completion()` call) lives once on the
+  base class; a subclass only overrides `resolve_api_base`/`resolve_api_key` if its vendor
+  needs something other than "pass through what the caller gave, or let litellm apply its
+  own default."
+- **`llm/providers/`** — one adapter per vendor: `AnthropicProvider`, `GeminiProvider`,
+  `OllamaProvider` (defaults its base URL to `OLLAMA_API_BASE`/`localhost:11434`), and
+  `OpenAICompatibleProvider` (bare OpenAI models, a self-hosted proxy, or OpenRouter — all
+  OpenAI-chat-shaped, so one adapter covers them; it's also the registry's catch-all for
+  any model string the others don't recognize). This is the adapter actually in use here —
+  both the router's model and the judge's model are just differently-configured instances
+  of it (own `api_base`/`api_key`, from `config.py`'s `API_BASE`/`API_KEY` vs.
+  `JUDGE_API_BASE`/`JUDGE_API_KEY`), not different vendors.
+- **`llm/registry.py`** — `get_provider(model)` picks the adapter by matching the model
+  string's prefix, trying vendor-specific adapters before falling back to
+  `OpenAICompatibleProvider`.
+- **`llm/__init__.py`** — the public `complete()` facade `agent.py`/`evaluate.py` actually
+  call; they never touch a provider class directly. This is also where the router-vs-judge
+  credential isolation lives: the `ORCHESTRATE_API_BASE`/`API_KEY` fallback only applies
+  when no explicit `model` is passed, so a call configured for a different model/provider
+  (like the judge) never silently inherits the router's endpoint or credentials — see
+  [Error handling](#error-handling) for the incident that motivated this.
+
+Anthropic/Gemini/Ollama aren't configured for this submission (see `PLAN.md` for why), but
+work out of the box — set `ORCHESTRATE_MODEL` (or `ORCHESTRATE_JUDGE_MODEL`) to a model
+string with that vendor's prefix and the matching `*_API_KEY` in `.env`; no code changes.
 
 ## Error handling
 
