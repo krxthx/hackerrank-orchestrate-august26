@@ -171,12 +171,46 @@ logic to build.
 ## Decisions locked in
 1. **Call pattern**: tool-calling agent loop (`agent.py` + new tools in `tools.py`), for
    flexibility — accepted trade-off of more LLM calls per message against free-tier caps,
-   mitigated with a lower `MAX_AGENT_STEPS` and inter-call pacing.
-2. **Model**: `gemini/gemini-2.5-flash` (already in `.env`) — free tier, native image + audio.
+   mitigated with `ROUTER_MAX_STEPS=6` and 4s inter-call pacing.
+2. **Model**: `gemini/gemini-flash-latest`, not `gemini-2.5-flash` — see note below.
 3. **Vision/audio**: send the real media file inline in the initial message for `image` and
    `voice` rows (not just captions/metadata) — native Gemini vision + audio support makes
-   this free to do properly rather than a corner cut.
-4. **Output path**: write directly to `dataset/output.csv` (the actual submission file).
+   this free to do properly rather than a corner cut. Confirmed working live: a voice-note
+   smoke test correctly extracted "airport pickup schedule change" from raw audio despite
+   `message_text` being empty for that row.
+4. **Output path**: write directly to `dataset/output.csv` (the actual submission file), plus
+   a scratch copy at `data/output/output.csv`.
+
+### Reliability: added checkpointing + local voice transcription
+Two full-run crashes in a row (Gemini daily quota exhaustion, then a transient `403
+Forbidden` from the user's internal proxy at message 24/110 -- confirmed transient, not
+image-specific, by retrying the exact same image payload seconds later and it worked)
+motivated two additions:
+- `transcribe.py`: local `faster-whisper` transcription for voice notes (see chat), decouples
+  voice-note reasoning from whether the configured LLM accepts audio input at all.
+- `pipeline.py` `run_pipeline`: now resumable. Each decision is appended to a checkpoint file
+  (`data/cache/<input-stem>_checkpoint.jsonl`) as soon as it's made, and a single message's
+  total agent-run failure is caught and replaced with the same safe fallback used for parse
+  failures, rather than raising and killing the whole batch. Rerunning `main.py` after a
+  crash now resumes instead of re-paying for already-decided messages.
+
+### Blocker: `gemini-flash-latest` free-tier DAILY quota exhausted after ~1 message
+The full 110-row run crashed after message 1/110: `RESOURCE_EXHAUSTED`, quotaId
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier`. This is a **daily** cap, not a per-minute
+one -- no amount of pacing/backoff fixes it within the same day. Between earlier curl probing
+and the 3 smoke tests, this key/project had already made ~15-20 requests to this model today,
+which was apparently enough to exhaust whatever daily allotment a very-recently-available
+alias like `gemini-flash-latest` gets on this key. `dataset/output.csv` was NOT corrupted --
+`main.py` only copies the finished result over at the very end, so the crash left the
+original blank template untouched.
+
+### Model note: `gemini-2.5-flash` doesn't work for this API key
+The configured `gemini/gemini-2.5-flash` returned `404 "no longer available to new users"` on
+live testing, and `gemini-2.0-flash` returned `429` with a free-tier quota of literally 0 for
+this key. `gemini/gemini-flash-latest` (an alias to Google's current default Flash model)
+works and is free-tier eligible for this key. Switched `.env`'s `ORCHESTRATE_MODEL`
+accordingly. If this key's available models change again, re-check with:
+`curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"`.
 
 ## Remaining call: `data/output/output.csv`
 Should the pipeline *also* keep writing a copy to `data/output/output.csv` (the scaffold's

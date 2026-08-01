@@ -6,9 +6,25 @@ reshape once the real challenge schema is known.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Role = Literal["system", "user", "assistant", "tool"]
+
+Action = Literal["notify", "digest", "mute"]
+
+MessageType = Literal[
+    "personal",
+    "urgent",
+    "event",
+    "payment",
+    "business_update",
+    "promotion",
+    "greeting",
+    "forward",
+    "spam",
+    "scam",
+    "unknown",
+]
 
 
 class ToolCallRecord(BaseModel):
@@ -44,3 +60,17 @@ class PipelineRecord(BaseModel):
     row_id: str | int | None = None
     input_text: str
     output_text: str
+
+
+class RoutingDecision(BaseModel):
+    """One output row for the Message Notification Router -- matches the required
+    output.csv columns exactly: message_id,action,message_type,reason,confidence,
+    evidence_message_ids.
+    """
+
+    message_id: str
+    action: Action
+    message_type: MessageType
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_message_ids: str = "none"

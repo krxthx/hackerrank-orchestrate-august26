@@ -6,12 +6,14 @@ config.py (or the ORCHESTRATE_MODEL env var) once you know what the
 challenge needs.
 """
 
+import time
+
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from orchestrate.config import API_BASE, API_KEY, MODEL
+from orchestrate.config import API_BASE, API_KEY, LLM_CALL_PACING_SECONDS, MODEL
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=5, max=90))
 def complete(
     messages: list[dict],
     *,
@@ -33,6 +35,9 @@ def complete(
     named provider.
     """
     import litellm
+
+    if LLM_CALL_PACING_SECONDS > 0:
+        time.sleep(LLM_CALL_PACING_SECONDS)
 
     return litellm.completion(
         model=model or MODEL,

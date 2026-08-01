@@ -16,14 +16,23 @@ from orchestrate.transcript import TranscriptLogger
 from orchestrate.types import AgentResult
 
 
-def run_agent(system_prompt: str, user_input: str, logger: TranscriptLogger | None = None) -> AgentResult:
+def run_agent(
+    system_prompt: str,
+    user_input: str | list[dict],
+    logger: TranscriptLogger | None = None,
+    max_steps: int | None = None,
+) -> AgentResult:
+    """`user_input` may be a plain string or a list of OpenAI-style content blocks
+    (e.g. `[{"type": "text", ...}, {"type": "image_url", ...}]`) for multimodal input.
+    """
     logger = logger or TranscriptLogger()
+    max_steps = max_steps or MAX_AGENT_STEPS
     messages = [
         {"role": SYSTEM_ROLE, "content": system_prompt},
         {"role": USER_ROLE, "content": user_input},
     ]
 
-    for step in range(1, MAX_AGENT_STEPS + 1):
+    for step in range(1, max_steps + 1):
         response = complete(messages, tools=tools.all_schemas())
         choice = response.choices[0].message
         tool_calls = choice.tool_calls or []
@@ -54,6 +63,6 @@ def run_agent(system_prompt: str, user_input: str, logger: TranscriptLogger | No
 
     return AgentResult(
         final_text="ERROR: exceeded MAX_AGENT_STEPS without a final answer",
-        steps_used=MAX_AGENT_STEPS,
+        steps_used=max_steps,
         hit_step_limit=True,
     )

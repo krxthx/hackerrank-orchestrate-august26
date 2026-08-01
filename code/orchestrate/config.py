@@ -24,3 +24,30 @@ MAX_AGENT_STEPS = int(os.environ.get("ORCHESTRATE_MAX_STEPS", "12"))
 TRANSCRIPTS_DIR = "transcripts"
 DATA_INPUT_DIR = "data/input"
 DATA_OUTPUT_DIR = "data/output"
+
+# Participant-facing dataset for this challenge (Message Notification Router).
+DATASET_DIR = "dataset"
+
+# How many LLM calls (tool-call steps + final answer) the router agent may make per message.
+# There are ~4 useful lookups per message (user, group-or-business, evidence history, daily
+# load), so this is deliberately tight -- a run hitting the ceiling signals a prompt problem,
+# not a legitimate need for more steps.
+ROUTER_MAX_STEPS = int(os.environ.get("ORCHESTRATE_ROUTER_MAX_STEPS", "6"))
+
+# Seconds to sleep between LLM calls, to stay under free-tier RPM caps (e.g. Gemini's free
+# tier). Applies per LLM call, not per message, since the tool loop makes several calls/message.
+LLM_CALL_PACING_SECONDS = float(os.environ.get("ORCHESTRATE_LLM_PACING_SECONDS", "4.0"))
+
+# Whether to attach voice-note audio inline as a native audio content block. Not every model
+# accepts audio input (confirmed: Gemini does, the MiniMax-via-proxy setup does not -- it
+# raises BadRequestError). When false, voice rows fall back to context-only reasoning (no
+# audio content, same as if a transcript were never available) instead of crashing the run.
+# Flip back to true once a transcription step (e.g. faster-whisper) replaces raw audio with
+# a real text transcript, or when using a model confirmed to accept audio.
+SEND_AUDIO_INLINE = os.environ.get("ORCHESTRATE_SEND_AUDIO_INLINE", "true").lower() == "true"
+
+# Local speech-to-text for voice notes (faster-whisper), used instead of/alongside native
+# audio input so voice-note reasoning works regardless of which LLM is configured.
+TRANSCRIBE_VOICE_NOTES = os.environ.get("ORCHESTRATE_TRANSCRIBE_VOICE_NOTES", "true").lower() == "true"
+WHISPER_MODEL_SIZE = os.environ.get("ORCHESTRATE_WHISPER_MODEL_SIZE", "base")
+WHISPER_COMPUTE_TYPE = os.environ.get("ORCHESTRATE_WHISPER_COMPUTE_TYPE", "int8")

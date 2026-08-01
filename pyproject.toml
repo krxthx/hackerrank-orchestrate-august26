@@ -10,6 +10,7 @@ dependencies = [
     "pandas>=2.2.0",
     "tenacity>=9.0.0",
     "rich>=13.9.0",
+    "faster-whisper>=1.0.0",
 ]
 
 [project.optional-dependencies]

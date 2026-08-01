@@ -1,0 +1,43 @@
+"""Loads the challenge dataset once and exposes indexed lookups for the tools in tools.py.
+
+Everything here is read-only and derived straight from dataset/*.csv -- no organizer-only
+files, no hardcoded labels. Loaded lazily (module-level singleton) so importing this module
+has no side effects until a lookup is actually needed.
+"""
+
+import os
+from functools import lru_cache
+
+import pandas as pd
+
+from orchestrate.config import DATASET_DIR
+
+
+class Dataset:
+    def __init__(self, root: str = DATASET_DIR):
+        self.root = root
+        self.users = self._read("users.csv").set_index("user_id", drop=False)
+        self.groups = self._read("groups.csv").set_index("group_id", drop=False)
+        self.group_members = self._read("group_members.csv")
+        self.business_accounts = self._read("business_accounts.csv").set_index("business_id", drop=False)
+        self.user_business_history = self._read("user_business_history.csv")
+        self.message_history = self._read("message_history.csv")
+        self.message_events = self._read("message_events.csv").set_index(["user_id", "message_id"])
+        self.images = self._read("images.csv").set_index("image_id", drop=False)
+        self.voice_notes = self._read("voice_notes.csv").set_index("voice_note_id", drop=False)
+        self.daily_notification_summary = self._read("daily_notification_summary.csv")
+
+    def _read(self, filename: str) -> pd.DataFrame:
+        return pd.read_csv(os.path.join(self.root, filename))
+
+    def media_path(self, media_type: str, media_id: str) -> str | None:
+        if media_type == "image" and media_id in self.images.index:
+            return os.path.join(self.root, self.images.loc[media_id, "file_path"])
+        if media_type == "voice" and media_id in self.voice_notes.index:
+            return os.path.join(self.root, self.voice_notes.loc[media_id, "file_path"])
+        return None
+
+
+@lru_cache(maxsize=1)
+def get_dataset() -> Dataset:
+    return Dataset()
