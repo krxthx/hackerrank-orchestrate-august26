@@ -8,8 +8,8 @@ import json
 import os
 from datetime import datetime, timezone
 
-from orchestrate.config import TRANSCRIPTS_DIR
-from orchestrate.constants import TRANSCRIPT_TIME_FORMAT
+from orchestrate.core.config import TRANSCRIPTS_DIR
+from orchestrate.core.constants import TRANSCRIPT_TIME_FORMAT
 
 
 class TranscriptLogger:

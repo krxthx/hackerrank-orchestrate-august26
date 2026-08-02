@@ -1,6 +1,6 @@
 """Offline tests for evidence.py -- shared by evaluate.py and validate.py."""
 
-from orchestrate.evidence import evidence_overlap, parse_evidence_ids
+from orchestrate.data.evidence import evidence_overlap, parse_evidence_ids
 
 
 def test_parse_evidence_ids_handles_none_and_nan():

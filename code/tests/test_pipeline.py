@@ -5,16 +5,16 @@ import json
 import pandas as pd
 import pytest
 
-from orchestrate.pipeline import (
+from orchestrate.routing.pipeline import (
     _checkpoint_fingerprint,
     _checkpoint_path,
     _content_blocked_decision,
+    _routing_source_paths,
     build_user_content,
     parse_result,
     run_pipeline,
 )
-from orchestrate.types import AgentResult
-from orchestrate.types import RoutingDecision
+from orchestrate.core.types import AgentResult, RoutingDecision
 
 
 def test_parse_result_valid_json():
@@ -99,11 +99,11 @@ def test_run_pipeline_step_limit_gets_an_honest_fallback_reason(tmp_path, monkey
     )
     checkpoint_path = tmp_path / "checkpoint.jsonl"
 
-    monkeypatch.setattr("orchestrate.pipeline._checkpoint_fingerprint", lambda _path: "b" * 64)
-    monkeypatch.setattr("orchestrate.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
-    monkeypatch.setattr("orchestrate.pipeline.build_user_content", lambda _row: "route")
+    monkeypatch.setattr("orchestrate.routing.pipeline._checkpoint_fingerprint", lambda _path: "b" * 64)
+    monkeypatch.setattr("orchestrate.routing.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
+    monkeypatch.setattr("orchestrate.routing.pipeline.build_user_content", lambda _row: "route")
     monkeypatch.setattr(
-        "orchestrate.pipeline.run_agent",
+        "orchestrate.routing.pipeline.run_agent",
         lambda *_args, **_kwargs: AgentResult(
             final_text="ERROR: exceeded MAX_AGENT_STEPS without a final answer",
             steps_used=6,
@@ -132,12 +132,20 @@ def test_checkpoint_fingerprint_changes_with_input_content(tmp_path):
     assert _checkpoint_path(str(input_path), first).endswith(f"messages_checkpoint_{first[:12]}.jsonl")
 
 
+def test_checkpoint_fingerprint_manifest_tracks_existing_source_files():
+    source_paths = _routing_source_paths()
+    assert source_paths
+    assert all(path.is_file() for path in source_paths)
+    assert any(path.as_posix().endswith("routing/pipeline.py") for path in source_paths)
+    assert any(path.as_posix().endswith("llm/providers/openai_compatible.py") for path in source_paths)
+
+
 def test_checkpoint_fingerprint_changes_with_model(tmp_path, monkeypatch):
     input_path = tmp_path / "messages.csv"
     input_path.write_text("message_id\nmsg_1\n")
     first = _checkpoint_fingerprint(str(input_path))
 
-    monkeypatch.setattr("orchestrate.pipeline.MODEL", "different-provider/different-model")
+    monkeypatch.setattr("orchestrate.routing.pipeline.MODEL", "different-provider/different-model")
     second = _checkpoint_fingerprint(str(input_path))
 
     assert first != second
@@ -161,11 +169,11 @@ def test_fresh_run_replaces_matching_checkpoint(tmp_path, monkeypatch):
     )
     checkpoint_path.write_text(json.dumps(stale.model_dump()) + "\n")
 
-    monkeypatch.setattr("orchestrate.pipeline._checkpoint_fingerprint", lambda _path: "a" * 64)
-    monkeypatch.setattr("orchestrate.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
-    monkeypatch.setattr("orchestrate.pipeline.build_user_content", lambda _row: "route")
+    monkeypatch.setattr("orchestrate.routing.pipeline._checkpoint_fingerprint", lambda _path: "a" * 64)
+    monkeypatch.setattr("orchestrate.routing.pipeline._checkpoint_path", lambda _path, _fingerprint: str(checkpoint_path))
+    monkeypatch.setattr("orchestrate.routing.pipeline.build_user_content", lambda _row: "route")
     monkeypatch.setattr(
-        "orchestrate.pipeline.run_agent",
+        "orchestrate.routing.pipeline.run_agent",
         lambda *_args, **_kwargs: AgentResult(
             final_text=(
                 '{"message_id":"msg_1","action":"notify","message_type":"personal",'

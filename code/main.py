@@ -19,11 +19,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from orchestrate.config import DATA_OUTPUT_DIR, DATASET_DIR  # noqa: E402
-from orchestrate.constants import DEFAULT_OUTPUT_FILENAME  # noqa: E402
-from orchestrate.errors import fatal_error_boundary  # noqa: E402
-from orchestrate.pipeline import run_pipeline  # noqa: E402
-from orchestrate.validate import validate_output  # noqa: E402
+from orchestrate.core.config import DATA_OUTPUT_DIR, DATASET_DIR  # noqa: E402
+from orchestrate.core.constants import DEFAULT_OUTPUT_FILENAME  # noqa: E402
+from orchestrate.core.errors import fatal_error_boundary  # noqa: E402
+from orchestrate.data.validation import validate_output  # noqa: E402
+from orchestrate.routing.pipeline import run_pipeline  # noqa: E402
 
 
 def main() -> None:

@@ -3,7 +3,7 @@ decisions) and evaluate.py (judge verdicts)."""
 
 import pytest
 
-from orchestrate.parsing import extract_json_object
+from orchestrate.core.parsing import extract_json_object
 
 
 def test_plain_json():

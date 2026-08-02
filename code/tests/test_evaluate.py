@@ -1,4 +1,4 @@
-"""Offline tests for evaluate.py's scoring logic -- no live LLM calls."""
+"""Offline tests for evaluation scoring logic -- no live LLM calls."""
 
 import json
 
@@ -6,10 +6,11 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from orchestrate import evaluate
-from orchestrate.evaluate import JudgeEvalResult, SampleEvalResult, _build_judge_context, _independent_route
-from orchestrate.parsing import extract_json_object
-from orchestrate.types import AgentResult, JudgeVerdict, RoutingDecision
+from orchestrate.core.parsing import extract_json_object
+from orchestrate.core.types import AgentResult, JudgeVerdict, RoutingDecision
+from orchestrate.evaluation import JudgeEvalResult, SampleEvalResult
+from orchestrate.evaluation import judge as evaluate
+from orchestrate.evaluation.judge import _build_judge_context, _independent_route
 
 
 def test_extract_json_strips_code_fence():
@@ -136,9 +137,9 @@ def _message_row() -> pd.Series:
 
 
 def test_independent_route_returns_none_on_step_limit(monkeypatch):
-    monkeypatch.setattr("orchestrate.evaluate.build_user_content", lambda _row: "route")
+    monkeypatch.setattr("orchestrate.evaluation.judge.build_user_content", lambda _row: "route")
     monkeypatch.setattr(
-        "orchestrate.evaluate.run_agent",
+        "orchestrate.evaluation.judge.run_agent",
         lambda *_args, **_kwargs: AgentResult(final_text="ERROR: stuck", steps_used=6, hit_step_limit=True),
     )
     assert _independent_route(_message_row(), "judge-model") is None
@@ -150,9 +151,9 @@ def test_independent_route_returns_none_on_unparseable_answer(monkeypatch):
     in run_judge_eval (this is exactly what happened for msg_048 in a live run before this
     was fixed: an empty response became a spurious 'digest' opinion counted as a disagreement).
     """
-    monkeypatch.setattr("orchestrate.evaluate.build_user_content", lambda _row: "route")
+    monkeypatch.setattr("orchestrate.evaluation.judge.build_user_content", lambda _row: "route")
     monkeypatch.setattr(
-        "orchestrate.evaluate.run_agent",
+        "orchestrate.evaluation.judge.run_agent",
         lambda *_args, **_kwargs: AgentResult(final_text="", steps_used=1),
     )
     assert _independent_route(_message_row(), "judge-model") is None
@@ -177,8 +178,8 @@ def test_independent_route_never_sees_router_decision(monkeypatch):
         }
         return AgentResult(final_text=json.dumps(payload), steps_used=1)
 
-    monkeypatch.setattr("orchestrate.evaluate.build_user_content", lambda row: f"route:{row['message_id']}")
-    monkeypatch.setattr("orchestrate.evaluate.run_agent", fake_run_agent)
+    monkeypatch.setattr("orchestrate.evaluation.judge.build_user_content", lambda row: f"route:{row['message_id']}")
+    monkeypatch.setattr("orchestrate.evaluation.judge.run_agent", fake_run_agent)
 
     decision = _independent_route(_message_row(), "judge-model")
 

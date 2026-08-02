@@ -14,7 +14,7 @@ import logging
 import os
 from functools import lru_cache
 
-from orchestrate.config import DATA_OUTPUT_DIR, WHISPER_COMPUTE_TYPE, WHISPER_MODEL_SIZE
+from orchestrate.core.config import DATA_OUTPUT_DIR, WHISPER_COMPUTE_TYPE, WHISPER_MODEL_SIZE
 
 logger = logging.getLogger(__name__)
 

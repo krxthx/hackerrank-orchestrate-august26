@@ -10,8 +10,8 @@ from functools import lru_cache
 
 import pandas as pd
 
-from orchestrate.config import DATASET_DIR
-from orchestrate.errors import DatasetError
+from orchestrate.core.config import DATASET_DIR
+from orchestrate.core.errors import DatasetError
 
 
 class Dataset:

@@ -3,7 +3,7 @@
 import pytest
 from tenacity import RetryError
 
-from orchestrate.errors import (
+from orchestrate.core.errors import (
     ConfigError,
     ContentFilterBlockedError,
     DatasetError,

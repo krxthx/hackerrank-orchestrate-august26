@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 import pandas as pd
 from pydantic import ValidationError
 
-from orchestrate.data import Dataset, get_dataset
-from orchestrate.errors import DatasetError
-from orchestrate.evidence import parse_evidence_ids
-from orchestrate.types import RoutingDecision
+from orchestrate.core.errors import DatasetError
+from orchestrate.core.types import RoutingDecision
+from orchestrate.data.dataset import Dataset, get_dataset
+from orchestrate.data.evidence import parse_evidence_ids
 
 
 @dataclass

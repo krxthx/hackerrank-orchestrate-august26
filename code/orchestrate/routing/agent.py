@@ -8,13 +8,13 @@ to the transcript.
 
 import json
 
-from orchestrate import tools
-from orchestrate.config import MAX_AGENT_STEPS
-from orchestrate.constants import ASSISTANT_ROLE, SYSTEM_ROLE, TOOL_ROLE, USER_ROLE
-from orchestrate.errors import OrchestrateError
+from orchestrate.core.config import MAX_AGENT_STEPS
+from orchestrate.core.constants import ASSISTANT_ROLE, SYSTEM_ROLE, TOOL_ROLE, USER_ROLE
+from orchestrate.core.errors import OrchestrateError
+from orchestrate.core.types import AgentResult
 from orchestrate.llm import complete
-from orchestrate.transcript import TranscriptLogger
-from orchestrate.types import AgentResult
+from orchestrate.routing import tools
+from orchestrate.runtime.transcript import TranscriptLogger
 
 
 def run_agent(

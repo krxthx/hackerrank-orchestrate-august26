@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from orchestrate.config import LLM_CALL_PACING_SECONDS
+from orchestrate.core.config import LLM_CALL_PACING_SECONDS
 
 
 class LLMProvider(ABC):

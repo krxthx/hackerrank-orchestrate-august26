@@ -72,18 +72,18 @@ flowchart TD
         MSG["dataset/messages.csv<br/>(one row per incoming message)"]
     end
 
-    subgraph Pipeline["code/orchestrate/pipeline.py"]
+    subgraph Pipeline["code/orchestrate/routing/pipeline.py"]
         BUILD["build_user_content()<br/>assemble message fields +<br/>inline image/audio if present"]
         PARSE["parse_result()<br/>extract & validate JSON"]
         CKPT[("checkpoint file<br/>data/cache/*_checkpoint.jsonl")]
     end
 
-    subgraph Agent["code/orchestrate/agent.py — run_agent()"]
+    subgraph Agent["code/orchestrate/routing/agent.py — run_agent()"]
         LOOP{"tool-calling loop<br/>(max ROUTER_MAX_STEPS)"}
         LLM["llm.py — complete()<br/>litellm, provider-agnostic"]
     end
 
-    subgraph Tools["code/orchestrate/tools.py"]
+    subgraph Tools["code/orchestrate/routing/tools.py"]
         T1["get_user_profile"]
         T2["get_group_context"]
         T3["get_business_context"]
@@ -91,12 +91,12 @@ flowchart TD
         T5["get_daily_load"]
     end
 
-    subgraph Data["code/orchestrate/data.py"]
+    subgraph Data["code/orchestrate/data/dataset.py"]
         DS["Dataset (lazy singleton)<br/>indexed CSVs: users, groups,<br/>group_members, business_accounts,<br/>user_business_history, message_history,<br/>message_events, images, voice_notes,<br/>daily_notification_summary"]
     end
 
     subgraph Media["media handling"]
-        WHISPER["transcribe.py<br/>faster-whisper (local STT)"]
+        WHISPER["runtime/transcription.py<br/>faster-whisper (local STT)"]
         FILES["dataset/media/{images,audio}"]
     end
 
@@ -107,7 +107,7 @@ flowchart TD
     end
 
     subgraph Log["Graded artifact"]
-        TRANS["transcript.py<br/>transcripts/run-*.md / .jsonl"]
+        TRANS["runtime/transcript.py<br/>transcripts/run-*.md / .jsonl"]
     end
 
     MSG --> BUILD
@@ -135,19 +135,30 @@ flowchart TD
 | Module | Responsibility |
 |---|---|
 | [`code/main.py`](code/main.py) | CLI entry point: `python code/main.py [--input] [--output]` |
-| [`orchestrate/pipeline.py`](code/orchestrate/pipeline.py) | Per-message run loop: builds agent input (incl. inline media), parses/validates the agent's output, checkpoints, writes `output.csv` |
-| [`orchestrate/agent.py`](code/orchestrate/agent.py) | Model-agnostic tool-calling loop shared by every message run |
-| [`orchestrate/tools.py`](code/orchestrate/tools.py) | The 5 dataset lookup tools the agent can call (see diagram) |
-| [`orchestrate/data.py`](code/orchestrate/data.py) | Loads all dataset CSVs once, indexes them for fast lookups |
+| [`orchestrate/routing/`](code/orchestrate/routing) | Agent loop, its five lookup tools, and the checkpointed per-message pipeline |
+| [`orchestrate/data/`](code/orchestrate/data) | Dataset loading/indexing, evidence helpers, and finished-output validation |
+| [`orchestrate/core/`](code/orchestrate/core) | Configuration, constants, Pydantic schemas, JSON parsing, and shared errors |
 | [`orchestrate/prompts/`](code/orchestrate/prompts) | System prompt encoding the routing policy |
-| [`orchestrate/types.py`](code/orchestrate/types.py) | Pydantic schemas — `RoutingDecision` matches `output.csv` exactly |
 | [`orchestrate/llm/`](code/orchestrate/llm) | Provider-adapter package — see [LLM providers](#llm-providers) below |
-| [`orchestrate/transcribe.py`](code/orchestrate/transcribe.py) | Local `faster-whisper` transcription for voice notes |
-| [`orchestrate/transcript.py`](code/orchestrate/transcript.py) | Logs every agent step to `transcripts/` (the graded chat-transcript artifact) |
-| [`orchestrate/config.py`](code/orchestrate/config.py) | All env-tunable settings (model, step limits, pacing, media flags) |
-| [`orchestrate/evaluate.py`](code/orchestrate/evaluate.py) | Eval pipeline: sample-set hard metrics + rubric-judge pass (see [Evaluation](#evaluation)) |
-| [`code/run_eval.py`](code/run_eval.py) | CLI entry point for `evaluate.py` |
-| [`orchestrate/errors.py`](code/orchestrate/errors.py) | Central error types + classification (see [Error handling](#error-handling)) |
+| [`orchestrate/runtime/`](code/orchestrate/runtime) | Local voice transcription and graded transcript capture |
+| [`orchestrate/evaluation/`](code/orchestrate/evaluation) | Sample metrics, rubric judging, and report serialization (see [Evaluation](#evaluation)) |
+| [`code/run_eval.py`](code/run_eval.py) | Evaluation CLI entry point |
+
+## Architectural decisions
+
+Framed as the questions a reviewer would actually ask, each with a concise why and what was
+ruled out instead. `PLAN.md` has the full chronological dev log (reversed decisions, live
+incidents, model-availability dead ends); this is the curated Q&A summary.
+
+| Question | Why (answer) | Ruled out instead |
+|---|---|---|
+| Why a hand-rolled tool-calling loop ([`routing/agent.py`](code/orchestrate/routing/agent.py)) instead of LangChain/LangGraph? | One agent, one ReAct loop over 5 tools — no multi-node graph to model. `litellm` already gives provider-agnostic completions, which is LangChain's main value-add here; the custom loop keeps retries/pacing/error-classification ([`core/errors.py`](code/orchestrate/core/errors.py)) fully visible and debuggable against a nonstandard internal proxy. | LangGraph — would earn its complexity if the router and judge became graph nodes with conditional branching; not at this scale. |
+| Why a tool-calling loop instead of one pre-joined context call? | Lets the model decide what context a given message actually needs (skip `get_business_context` for a personal chat, skip `get_daily_load` for an obvious scam) instead of paying for every lookup on every message. Trade-off: more LLM round-trips per message, mitigated with `ROUTER_MAX_STEPS=6` and inter-call pacing. | Pre-joining everything into one prompt — fewer calls, but forces every message through every lookup and doesn't scale as tools are added. |
+| How is personalization handled — is a memory system needed? | No — the provided CSVs already *are* the memory. No new preference signal is generated during a run that isn't already a column in `users.csv`/`message_history.csv`/etc.; every decision re-queries the same static dataset fresh, and nothing the router decides gets written back anywhere. | A learned/evolving user-preference store — would matter with a live feedback loop back into the system; this challenge doesn't have one. |
+| Why no RAG / vector store? | Context is deterministic key-based lookups (`user_id`, `group_id`, ...) against small structured CSVs with known IDs, not semantic search over an unstructured corpus. | A vector store over `message_history.csv` for evidence retrieval — unnecessary; exact-match filtering (sender/group/business + recency) is both correct and cheap. |
+| Is the judge always a separate model from the router? | It's meant to be, to avoid self-grading bias — but it's currently pointed at the same proxy/model the router uses. | Keeping a genuinely separate free-tier judge model — its daily request cap is below the dataset's row count, so it couldn't grade the full file in one day even without the independent-opinion pass below. Revisit once a judge endpoint with real headroom is available. |
+| Why does the judge form its own independent opinion ([`evaluation/judge.py`](code/orchestrate/evaluation/judge.py)) before grading? | A judge shown the decision it's critiquing tends to rate it charitably. Re-routing the same message from scratch, never shown the router's actual answer, and comparing programmatically (`agrees_with_independent`) is a sturdier signal than the judge self-reporting agreement. | Judge only sees the router's decision + context — kept as the default path; the independent pass is additive (`--no-independent-opinion` to skip it), not a replacement. |
+| Why per-row checkpointing instead of all-or-nothing batch runs? | A crash partway through 110 rows (rate limit, proxy hiccup, quota exhaustion) should cost one row, not the whole run. | Retrying the whole batch on any failure — rejected after two full-run crashes during development wasted already-decided rows. |
 
 ## LLM providers
 
@@ -165,12 +176,12 @@ single wrapper function:
   OpenAI-chat-shaped, so one adapter covers them; it's also the registry's catch-all for
   any model string the others don't recognize). This is the adapter actually in use here —
   both the router's model and the judge's model are just differently-configured instances
-  of it (own `api_base`/`api_key`, from `config.py`'s `API_BASE`/`API_KEY` vs.
+  of it (own `api_base`/`api_key`, from `core/config.py`'s `API_BASE`/`API_KEY` vs.
   `JUDGE_API_BASE`/`JUDGE_API_KEY`), not different vendors.
 - **`llm/registry.py`** — `get_provider(model)` picks the adapter by matching the model
   string's prefix, trying vendor-specific adapters before falling back to
   `OpenAICompatibleProvider`.
-- **`llm/__init__.py`** — the public `complete()` facade `agent.py`/`evaluate.py` actually
+- **`llm/__init__.py`** — the public `complete()` facade routing and evaluation actually
   call; they never touch a provider class directly. This is also where the router-vs-judge
   credential isolation lives: the `ORCHESTRATE_API_BASE`/`API_KEY` fallback only applies
   when no explicit `model` is passed, so a call configured for a different model/provider
@@ -183,7 +194,7 @@ string with that vendor's prefix and the matching `*_API_KEY` in `.env`; no code
 
 ## Error handling
 
-All error handling funnels through [`orchestrate/errors.py`](code/orchestrate/errors.py)
+All error handling funnels through [`orchestrate/core/errors.py`](code/orchestrate/core/errors.py)
 instead of ad hoc `try/except` string-matching scattered per call site:
 
 - **`OrchestrateError` hierarchy** — `ConfigError` (bad/missing API key or endpoint),
@@ -194,8 +205,8 @@ instead of ad hoc `try/except` string-matching scattered per call site:
   Each carries a `user_message` that's meaningful on its own — no raw provider stack traces
   surfacing to a log line or a `reason` field.
 - **`classify_llm_error(exc)`** is the single place that inspects a raw litellm/tenacity
-  failure and returns the right typed error — used by both `pipeline.py` (routing) and
-  `evaluate.py` (judging), so a 403 vs. a 429 vs. an auth failure is classified the same way
+  failure and returns the right typed error — used by both routing and evaluation, so a 403
+  vs. a 429 vs. an auth failure is classified the same way
   everywhere, not re-derived per module.
 - **Per-row resilience vs. fatal errors** — inside a batch run, a single row's `LLMCallError`
   or `ContentFilterBlockedError` is caught and turned into a safe fallback decision (the run
@@ -217,7 +228,7 @@ pip install -e ".[dev]"
 cp .env.example .env   # fill in whichever provider key(s) you're using
 ```
 
-`.env` / `ORCHESTRATE_MODEL` selects the provider (see [`config.py`](code/orchestrate/config.py)
+`.env` / `ORCHESTRATE_MODEL` selects the provider (see [`core/config.py`](code/orchestrate/core/config.py)
 for the full list of tunables — model, step limits, LLM call pacing, whether to send audio
 inline vs. transcribe it locally).
 
@@ -247,7 +258,7 @@ calls required.
 ## Evaluation
 
 There's no hidden ground truth available before submission, so
-[`code/orchestrate/evaluate.py`](code/orchestrate/evaluate.py) runs two independent checks
+[`code/orchestrate/evaluation/`](code/orchestrate/evaluation) runs two independent checks
 via [`code/run_eval.py`](code/run_eval.py):
 
 ```bash
@@ -262,14 +273,20 @@ python code/run_eval.py judge --limit 10   # smoke test on the first N rows
    blind to the given labels, then scores predictions against them: action accuracy,
    message_type accuracy, evidence-set Jaccard overlap, and confidence calibration (Brier
    score). Small sample — treat as a regression check, not a true accuracy estimate.
-2. **`judge`** — for every row already in `output.csv`, a separate judge model scores the
-   decision against the same five dimensions `problem_statement.md` says the hidden grader
-   uses (action/message_type correctness, reason quality, evidence relevance, confidence
+2. **`judge`** — for every row already in `output.csv`, a judge model scores the decision
+   against the same five dimensions `problem_statement.md` says the hidden grader uses
+   (action/message_type correctness, reason quality, evidence relevance, confidence
    calibration), seeing the same context the router had — including the real content behind
    any cited `evidence_message_ids`, so it can verify relevance rather than trust the
-   citation. Runs on a separate `ORCHESTRATE_JUDGE_MODEL` (any litellm-supported
-   provider/endpoint — set it plus `ORCHESTRATE_JUDGE_API_KEY`/`_API_BASE` in `.env`) so
-   grading isn't done by the same model that made the decisions.
+   citation. Runs on `ORCHESTRATE_JUDGE_MODEL` (any litellm-supported provider/endpoint —
+   set it plus `ORCHESTRATE_JUDGE_API_KEY`/`_API_BASE` in `.env`), ideally a different model
+   from the router's `MODEL` so grading isn't self-graded (see
+   [Architectural decisions](#architectural-decisions)).
+
+   Before grading, each row also gets a **blind independent second opinion**: the judge
+   model re-routes the same message from scratch, never shown the router's actual decision,
+   and the two are compared programmatically (`agrees_with_independent` in the report). Pass
+   `--no-independent-opinion` to skip this and grade faster/cheaper.
 
 Both write a per-row + aggregate-summary JSON report to `data/output/eval_report.json`.
 

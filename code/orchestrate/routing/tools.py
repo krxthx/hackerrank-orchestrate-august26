@@ -13,8 +13,8 @@ from typing import Callable, get_type_hints
 
 import pandas as pd
 
-from orchestrate.data import get_dataset
-from orchestrate.types import ToolSpec
+from orchestrate.core.types import ToolSpec
+from orchestrate.data.dataset import get_dataset
 
 _PY_TO_JSON_TYPE = {str: "string", int: "integer", float: "number", bool: "boolean"}
 

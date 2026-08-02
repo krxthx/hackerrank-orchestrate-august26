@@ -4,7 +4,7 @@ actual dataset/ CSVs (no live LLM calls).
 
 import json
 
-from orchestrate import tools
+from orchestrate.routing import tools
 
 
 def test_all_five_tools_registered():

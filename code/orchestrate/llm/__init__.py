@@ -7,7 +7,7 @@ endpoints (including OpenRouter), or a local model served through Ollama -- just
 MODEL in config.py (or the ORCHESTRATE_MODEL env var).
 """
 
-from orchestrate.config import API_BASE, API_KEY, MODEL
+from orchestrate.core.config import API_BASE, API_KEY, MODEL
 from orchestrate.llm.registry import get_provider
 
 

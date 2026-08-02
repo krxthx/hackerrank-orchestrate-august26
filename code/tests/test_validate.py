@@ -3,8 +3,8 @@
 import pandas as pd
 import pytest
 
-from orchestrate.errors import DatasetError
-from orchestrate.validate import validate_output
+from orchestrate.core.errors import DatasetError
+from orchestrate.data.validation import validate_output
 
 MESSAGES_HEADER = "message_id,user_id,conversation_type,group_id,business_id,sender_user_id,created_at,message_text,media_type,media_id,forwarded_count\n"
 OUTPUT_HEADER = "message_id,action,message_type,reason,confidence,evidence_message_ids\n"

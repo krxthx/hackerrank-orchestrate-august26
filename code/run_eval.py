@@ -19,9 +19,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from orchestrate.config import DATA_OUTPUT_DIR, JUDGE_MODEL  # noqa: E402
-from orchestrate.errors import fatal_error_boundary  # noqa: E402
-from orchestrate.evaluate import run_judge_eval, run_sample_eval, write_report  # noqa: E402
+from orchestrate.core.config import DATA_OUTPUT_DIR, JUDGE_MODEL  # noqa: E402
+from orchestrate.core.errors import fatal_error_boundary  # noqa: E402
+from orchestrate.evaluation import run_judge_eval, run_sample_eval, write_report  # noqa: E402
 
 
 def main() -> None:

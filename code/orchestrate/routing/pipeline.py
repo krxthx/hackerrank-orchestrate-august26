@@ -16,9 +16,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import ValidationError
 
-from orchestrate import transcribe
-from orchestrate.agent import run_agent
-from orchestrate.config import (
+from orchestrate.core.config import (
     API_BASE,
     DATA_OUTPUT_DIR,
     DATASET_DIR,
@@ -29,25 +27,27 @@ from orchestrate.config import (
     WHISPER_COMPUTE_TYPE,
     WHISPER_MODEL_SIZE,
 )
-from orchestrate.constants import DEFAULT_OUTPUT_FILENAME
-from orchestrate.data import get_dataset
-from orchestrate.errors import (
+from orchestrate.core.constants import DEFAULT_OUTPUT_FILENAME
+from orchestrate.core.errors import (
     ContentFilterBlockedError,
     DatasetError,
     classify_llm_error,
     describe_parse_error,
     describe_step_limit,
 )
-from orchestrate.parsing import extract_json_object
+from orchestrate.core.parsing import extract_json_object
+from orchestrate.core.types import RoutingDecision
+from orchestrate.data.dataset import get_dataset
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT
-from orchestrate.transcript import TranscriptLogger
-from orchestrate.types import RoutingDecision
+from orchestrate.routing.agent import run_agent
+from orchestrate.runtime import transcription as transcribe
+from orchestrate.runtime.transcript import TranscriptLogger
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_COLUMNS = ["message_id", "action", "message_type", "reason", "confidence", "evidence_message_ids"]
 
-_CHECKPOINT_FINGERPRINT_VERSION = 1
+_CHECKPOINT_FINGERPRINT_VERSION = 2
 _CONTEXT_FILENAMES = (
     "users.csv",
     "groups.csv",
@@ -60,15 +60,12 @@ _CONTEXT_FILENAMES = (
     "voice_notes.csv",
     "daily_notification_summary.csv",
 )
-_ROUTING_SOURCE_FILENAMES = (
-    "agent.py",
-    "data.py",
-    "llm.py",
-    "pipeline.py",
-    "tools.py",
-    "transcribe.py",
-    "types.py",
+_ROUTING_SOURCE_DIRS = ("core", "llm", "routing")
+_ROUTING_SOURCE_FILES = (
+    os.path.join("data", "dataset.py"),
+    os.path.join("data", "evidence.py"),
     os.path.join("prompts", "system.py"),
+    os.path.join("runtime", "transcription.py"),
 )
 
 
@@ -196,6 +193,15 @@ def _update_hash_from_file(digest, label: str, path: Path) -> None:
     digest.update(b"\0")
 
 
+def _routing_source_paths(package_root: Path | None = None) -> list[Path]:
+    """Return every Python source file that can affect a routing decision."""
+    root = package_root or Path(__file__).resolve().parents[1]
+    paths = [root / relative_path for relative_path in _ROUTING_SOURCE_FILES]
+    for directory in _ROUTING_SOURCE_DIRS:
+        paths.extend((root / directory).rglob("*.py"))
+    return sorted(set(paths))
+
+
 def _checkpoint_fingerprint(input_path: str) -> str:
     """Identify everything that can materially change routing decisions.
 
@@ -231,9 +237,10 @@ def _checkpoint_fingerprint(input_path: str) -> str:
     else:
         digest.update(b"media:missing\0")
 
-    source_root = Path(__file__).resolve().parent
-    for filename in _ROUTING_SOURCE_FILENAMES:
-        _update_hash_from_file(digest, f"source:{filename}", source_root / filename)
+    package_root = Path(__file__).resolve().parents[1]
+    for source_path in _routing_source_paths(package_root):
+        label = source_path.relative_to(package_root).as_posix()
+        _update_hash_from_file(digest, f"source:{label}", source_path)
     return digest.hexdigest()
 
 
