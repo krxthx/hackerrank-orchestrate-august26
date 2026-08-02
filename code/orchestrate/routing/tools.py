@@ -15,6 +15,8 @@ import pandas as pd
 
 from orchestrate.core.types import ToolSpec
 from orchestrate.data.dataset import get_dataset
+from orchestrate.data.retrieval import rank_history_hybrid
+from orchestrate.data.signals import is_within_quiet_hours
 
 _PY_TO_JSON_TYPE = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
@@ -97,13 +99,23 @@ def _row_to_dict(row: pd.Series) -> dict:
     "Look up a user's notification behavior: quiet hours (do_not_disturb_window) and their "
     "30-day counts of messages opened, replied to, notifications dismissed, and reports filed. "
     "Call this for the message's receiving user_id before deciding action/confidence.",
-    params={"user_id": "The receiving user's user_id (from the incoming message)."},
+    params={
+        "user_id": "The receiving user's user_id (from the incoming message).",
+        "message_created_at": "The incoming message's created_at, e.g. '2026-07-31 23:10'. "
+        "Pass this to get a deterministic quiet_hours_now flag instead of comparing the "
+        "window yourself; leave as '' to skip that check.",
+    },
 )
-def get_user_profile(user_id: str) -> str:
+def get_user_profile(user_id: str, message_created_at: str = "") -> str:
     ds = get_dataset()
     if user_id not in ds.users.index:
         return json.dumps({"error": f"unknown user_id: {user_id}"})
-    return json.dumps(_row_to_dict(ds.users.loc[user_id]))
+    profile = _row_to_dict(ds.users.loc[user_id])
+    if message_created_at:
+        profile["quiet_hours_now"] = is_within_quiet_hours(
+            message_created_at, profile.get("do_not_disturb_window")
+        )
+    return json.dumps(profile)
 
 
 @tool(
@@ -147,17 +159,22 @@ def get_business_context(business_id: str, user_id: str) -> str:
 
 
 @tool(
-    "Fetch the receiving user's most recent PAST messages from the same sender, group, or "
+    "Fetch the receiving user's most relevant PAST messages from the same sender, group, or "
     "business (pass whichever of sender_user_id/group_id/business_id apply, leave others as "
     "empty string), each annotated with how the user reacted (opened/replied/dismissed/muted/"
-    "reported). This is the ONLY valid source for evidence_message_ids in your final answer -- "
+    "reported). Ranking blends recency with textual similarity to the current message when "
+    "current_message_text is passed, so a relevant-but-older precedent (e.g. an earlier "
+    "near-identical scam or the same recurring ask) isn't crowded out by unrelated recent "
+    "chatter. This is the ONLY valid source for evidence_message_ids in your final answer -- "
     "never cite a message_id that was not returned by this tool. Returns 'none' if nothing matches.",
     params={
         "user_id": "The receiving user's user_id.",
         "sender_user_id": "Filter to this sender only, or '' (empty string) to not filter by sender.",
         "group_id": "Filter to this group only, or '' (empty string) to not filter by group.",
         "business_id": "Filter to this business only, or '' (empty string) to not filter by business.",
-        "limit": "Max number of past messages to return, most recent first.",
+        "current_message_text": "The incoming message's own text, used to rank past messages "
+        "by relevance instead of pure recency. Leave as '' to fall back to most-recent-first.",
+        "limit": "Max number of past messages to return.",
     },
 )
 def get_message_history(
@@ -165,6 +182,7 @@ def get_message_history(
     sender_user_id: str = "",
     group_id: str = "",
     business_id: str = "",
+    current_message_text: str = "",
     limit: int = 8,
 ) -> str:
     ds = get_dataset()
@@ -180,7 +198,7 @@ def get_message_history(
     if sender_user_id or group_id or business_id:
         history = history[match]
 
-    history = history.sort_values("created_at", ascending=False).head(limit)
+    history = rank_history_hybrid(history, current_message_text, limit)
     if history.empty:
         return json.dumps({"history": []})
 

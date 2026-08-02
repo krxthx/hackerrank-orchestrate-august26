@@ -44,6 +44,23 @@ def test_get_user_profile_unknown_user():
     assert "error" in result
 
 
+def test_get_user_profile_quiet_hours_flag():
+    # u_001's do_not_disturb_window is 22:00-07:00 (dataset/users.csv).
+    inside = json.loads(
+        tools.call("get_user_profile", {"user_id": "u_001", "message_created_at": "2026-07-31 23:10"})
+    )
+    outside = json.loads(
+        tools.call("get_user_profile", {"user_id": "u_001", "message_created_at": "2026-07-31 12:00"})
+    )
+    assert inside["quiet_hours_now"] is True
+    assert outside["quiet_hours_now"] is False
+
+
+def test_get_user_profile_without_created_at_omits_quiet_hours():
+    result = json.loads(tools.call("get_user_profile", {"user_id": "u_001"}))
+    assert "quiet_hours_now" not in result
+
+
 def test_get_message_history_returns_only_matching_rows():
     result = json.loads(
         tools.call(
@@ -64,3 +81,22 @@ def test_get_message_history_no_match_returns_empty():
         )
     )
     assert result["history"] == []
+
+
+def test_get_message_history_with_current_text_still_filters_correctly():
+    result = json.loads(
+        tools.call(
+            "get_message_history",
+            {
+                "user_id": "u_011",
+                "sender_user_id": "u_043",
+                "group_id": "",
+                "business_id": "",
+                "current_message_text": "motor room valve tanker water supply",
+                "limit": 5,
+            },
+        )
+    )
+    for record in result["history"]:
+        assert record["user_id"] == "u_011"
+        assert record["sender_user_id"] == "u_043"

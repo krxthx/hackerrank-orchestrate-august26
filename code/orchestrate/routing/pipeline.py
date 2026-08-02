@@ -38,6 +38,7 @@ from orchestrate.core.errors import (
 from orchestrate.core.parsing import extract_json_object
 from orchestrate.core.types import RoutingDecision
 from orchestrate.data.dataset import get_dataset
+from orchestrate.data.signals import scam_keyword_signals
 from orchestrate.prompts import DEFAULT_SYSTEM_PROMPT
 from orchestrate.routing.agent import run_agent
 from orchestrate.runtime import transcription as transcribe
@@ -105,6 +106,9 @@ def build_user_content(row: pd.Series) -> str | list[dict]:
                 logger.warning("transcription failed for %s (%s): %s", row["message_id"], media_id, exc)
         if not TRANSCRIBE_VOICE_NOTES and not SEND_AUDIO_INLINE:
             fields["voice_note_content"] = "unavailable -- reason from context (sender/group/history) only"
+
+    scam_text = fields.get("message_text") or fields.get("voice_transcript")
+    fields["scam_keyword_signals"] = scam_keyword_signals(scam_text)
 
     text = (
         "Route this incoming message. Use the tools to gather context on the receiving "

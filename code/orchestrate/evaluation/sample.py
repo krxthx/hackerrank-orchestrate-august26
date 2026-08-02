@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -30,6 +31,47 @@ INPUT_COLUMNS = [
 ]
 
 
+def _confusion_matrix(scored: list[dict], predicted_key: str, expected_key: str) -> list[dict]:
+    """Counts of (expected -> predicted) pairs, misclassifications only, most frequent first.
+    Meant to answer "what does the model most often confuse for what", not to duplicate the
+    accuracy figure already in summary().
+    """
+    pairs = [
+        (row[expected_key], row[predicted_key])
+        for row in scored
+        if expected_key in row and predicted_key in row and row[expected_key] != row[predicted_key]
+    ]
+    counts = Counter(pairs)
+    return [
+        {"expected": expected, "predicted": predicted, "count": count}
+        for (expected, predicted), count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
+def _calibration_buckets(scored: list[dict]) -> list[dict]:
+    """Reliability diagram data: for each confidence decile, mean confidence vs. actual
+    action accuracy. A well-calibrated router has mean_confidence ~= accuracy in every
+    bucket; a bucket where confidence is consistently higher than accuracy is overconfident.
+    """
+    edges = [(i / 10, (i + 1) / 10) for i in range(10)]
+    buckets = []
+    for low, high in edges:
+        in_bucket = [
+            row for row in scored if low <= row["confidence"] < high or (high == 1.0 and row["confidence"] == 1.0)
+        ]
+        if not in_bucket:
+            continue
+        buckets.append(
+            {
+                "range": f"{low:.1f}-{high:.1f}",
+                "n": len(in_bucket),
+                "mean_confidence": round(sum(row["confidence"] for row in in_bucket) / len(in_bucket), 3),
+                "action_accuracy": round(sum(row["action_correct"] for row in in_bucket) / len(in_bucket), 3),
+            }
+        )
+    return buckets
+
+
 @dataclass
 class SampleEvalResult:
     rows: list[dict] = field(default_factory=list)
@@ -56,6 +98,11 @@ class SampleEvalResult:
             "message_type_accuracy": round(type_accuracy, 3),
             "evidence_overlap_mean": round(overlap, 3),
             "confidence_brier_score": round(brier, 3),
+            "action_confusion_matrix": _confusion_matrix(scored, "predicted_action", "expected_action"),
+            "message_type_confusion_matrix": _confusion_matrix(
+                scored, "predicted_message_type", "expected_message_type"
+            ),
+            "confidence_calibration": _calibration_buckets(scored),
         }
 
 
