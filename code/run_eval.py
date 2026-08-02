@@ -38,17 +38,23 @@ def main() -> None:
     parser.add_argument(
         "--report", default=os.path.join(DATA_OUTPUT_DIR, "eval_report.json"), help="Where to write the JSON report."
     )
+    parser.add_argument(
+        "--workers", type=int, default=1, help="Score this many judge-eval rows concurrently (judge mode only)."
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     with fatal_error_boundary():
-        sample_result = run_sample_eval(limit=args.limit) if args.mode in ("sample", "all") else None
+        sample_result = (
+            run_sample_eval(limit=args.limit, workers=args.workers) if args.mode in ("sample", "all") else None
+        )
         judge_result = (
             run_judge_eval(
                 judge_model=args.judge_model,
                 limit=args.limit,
                 independent_opinion=not args.no_independent_opinion,
+                workers=args.workers,
             )
             if args.mode in ("judge", "all")
             else None

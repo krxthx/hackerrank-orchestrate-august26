@@ -301,6 +301,7 @@ python code/run_eval.py sample          # hard metrics vs dataset/sample_message
 python code/run_eval.py judge           # rubric-judge pass over dataset/output.csv
 python code/run_eval.py all             # both
 python code/run_eval.py judge --limit 10   # smoke test on the first N rows
+python code/run_eval.py judge --limit 20 --workers 8   # same, scored concurrently
 ```
 
 1. **`sample`** — re-routes the 30 labeled rows in `dataset/sample_messages.csv` (a separate
@@ -323,7 +324,16 @@ python code/run_eval.py judge --limit 10   # smoke test on the first N rows
    and the two are compared programmatically (`agrees_with_independent` in the report). Pass
    `--no-independent-opinion` to skip this and grade faster/cheaper.
 
-Both write a per-row + aggregate-summary JSON report to `data/output/eval_report.json`.
+Both `sample` and `judge` default to `--workers 1` (rows scored one at a time). Each row can
+issue two or more sequential LLM calls plus a fixed `ORCHESTRATE_LLM_PACING_SECONDS` delay
+per call, so at `--workers 1` a full pass over `judge`'s 110 rows can take hours. Pass
+`--workers N` to score N rows concurrently (each still paced individually) — safe against an
+endpoint that tolerates concurrent requests, such as a dedicated proxy rather than a shared
+free-tier one. `--workers 8` cut a 20-row `judge` smoke test from ~13 minutes (8 rows,
+sequential) to ~3 minutes (20 rows, concurrent).
+
+Both write a per-row + aggregate-summary JSON report to `data/output/eval_report.json` (or
+wherever `--report` points).
 
 ## Output schema
 

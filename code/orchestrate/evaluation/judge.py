@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -175,14 +176,49 @@ def _judge_one(context_json: str, judge_model: str) -> JudgeVerdict:
         raise DecisionParseError(describe_parse_error(exc), cause=exc) from exc
 
 
+def _score_row(message_row: pd.Series, decision_row: pd.Series, judge_model: str, independent_opinion: bool) -> dict:
+    message_id = decision_row["message_id"]
+    independent = None
+    if independent_opinion:
+        try:
+            independent = _independent_route(message_row, judge_model)
+        except Exception as exc:
+            error = classify_llm_error(exc)
+            logger.warning("independent re-route failed for %s, grading without it: %s", message_id, error)
+
+    try:
+        verdict = _judge_one(_build_judge_context(message_row, decision_row, independent), judge_model)
+        return {
+            "message_id": message_id,
+            "ok": True,
+            "action_plausible": verdict.action_plausible,
+            "message_type_plausible": verdict.message_type_plausible,
+            "reason_score": verdict.reason_score,
+            "evidence_score": verdict.evidence_score,
+            "confidence_score": verdict.confidence_score,
+            "safety_concern": verdict.safety_concern,
+            "critique": verdict.critique,
+            "independent_action": independent.action if independent else None,
+            "agrees_with_independent": independent.action == decision_row["action"] if independent else None,
+        }
+    except OrchestrateError as exc:
+        logger.warning("judge failed to score %s: %s", message_id, exc)
+        return {"message_id": message_id, "ok": False, "error": exc.user_message}
+
+
 def run_judge_eval(
     messages_path: str = os.path.join(DATASET_DIR, "messages.csv"),
     output_path: str = os.path.join(DATASET_DIR, "output.csv"),
     judge_model: str = JUDGE_MODEL,
     limit: int | None = None,
     independent_opinion: bool = True,
+    workers: int = 1,
 ) -> JudgeEvalResult:
-    """Grade submission decisions, optionally with a blind independent opinion."""
+    """Grade submission decisions, optionally with a blind independent opinion.
+
+    `workers` > 1 scores rows concurrently (each row still makes its own paced LLM
+    calls) -- only safe against an endpoint that won't choke on concurrent requests.
+    """
     for path in (messages_path, output_path):
         if not os.path.exists(path):
             raise DatasetError(f"Judge eval input not found: {path}.")
@@ -194,39 +230,25 @@ def run_judge_eval(
     if limit:
         output_frame = output_frame.head(limit)
 
-    result = JudgeEvalResult()
-    for index, decision_row in output_frame.iterrows():
+    rows_to_score = []
+    for _, decision_row in output_frame.iterrows():
         message_id = decision_row["message_id"]
         if message_id not in messages_frame.index:
             logger.warning("skipping %s: not found in %s", message_id, messages_path)
             continue
-        message_row = messages_frame.loc[message_id]
-        independent = None
-        if independent_opinion:
-            try:
-                independent = _independent_route(message_row, judge_model)
-            except Exception as exc:
-                error = classify_llm_error(exc)
-                logger.warning("independent re-route failed for %s, grading without it: %s", message_id, error)
+        rows_to_score.append((message_id, messages_frame.loc[message_id], decision_row))
 
-        try:
-            verdict = _judge_one(_build_judge_context(message_row, decision_row, independent), judge_model)
-            record = {
-                "message_id": message_id,
-                "ok": True,
-                "action_plausible": verdict.action_plausible,
-                "message_type_plausible": verdict.message_type_plausible,
-                "reason_score": verdict.reason_score,
-                "evidence_score": verdict.evidence_score,
-                "confidence_score": verdict.confidence_score,
-                "safety_concern": verdict.safety_concern,
-                "critique": verdict.critique,
-                "independent_action": independent.action if independent else None,
-                "agrees_with_independent": independent.action == decision_row["action"] if independent else None,
-            }
-        except OrchestrateError as exc:
-            logger.warning("judge failed to score %s: %s", message_id, exc)
-            record = {"message_id": message_id, "ok": False, "error": exc.user_message}
-        result.rows.append(record)
-        logger.info("[%d/%d] judged %s (ok=%s)", index + 1, len(output_frame), message_id, record["ok"])
+    result = JudgeEvalResult()
+    total = len(rows_to_score)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {
+            executor.submit(_score_row, message_row, decision_row, judge_model, independent_opinion): message_id
+            for message_id, message_row, decision_row in rows_to_score
+        }
+        for future in as_completed(futures):
+            record = future.result()
+            result.rows.append(record)
+            completed += 1
+            logger.info("[%d/%d] judged %s (ok=%s)", completed, total, record["message_id"], record["ok"])
     return result

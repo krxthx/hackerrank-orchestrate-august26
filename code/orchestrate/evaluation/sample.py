@@ -3,6 +3,7 @@
 import logging
 import os
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -106,12 +107,49 @@ class SampleEvalResult:
         }
 
 
+def _score_sample_row(row: pd.Series, max_steps: int) -> dict:
+    message_id = row["message_id"]
+    try:
+        input_row = row[[column for column in INPUT_COLUMNS if column in row.index]]
+        content = build_user_content(input_row)
+        agent_result = run_agent(DEFAULT_SYSTEM_PROMPT, content, max_steps=max_steps)
+        if agent_result.hit_step_limit:
+            error_message = describe_step_limit(max_steps)
+            logger.warning("sample eval hit step limit for %s: %s", message_id, error_message)
+            return {"message_id": message_id, "ok": False, "error": error_message}
+        prediction = parse_result(agent_result.final_text, message_id)
+        expected_evidence = parse_evidence_ids(row.get("evidence_message_ids"))
+        return {
+            "message_id": message_id,
+            "ok": True,
+            "predicted_action": prediction.action,
+            "expected_action": row["action"],
+            "action_correct": prediction.action == row["action"],
+            "predicted_message_type": prediction.message_type,
+            "expected_message_type": row["message_type"],
+            "message_type_correct": prediction.message_type == row["message_type"],
+            "confidence": prediction.confidence,
+            "evidence_overlap": evidence_overlap(prediction.evidence_message_ids, expected_evidence),
+        }
+    except DatasetError:
+        raise
+    except Exception as exc:
+        error = classify_llm_error(exc)
+        logger.warning("sample eval failed for %s, skipping: %s", message_id, error)
+        return {"message_id": message_id, "ok": False, "error": error.user_message}
+
+
 def run_sample_eval(
     sample_path: str = os.path.join(DATASET_DIR, "sample_messages.csv"),
     max_steps: int = ROUTER_MAX_STEPS,
     limit: int | None = None,
+    workers: int = 1,
 ) -> SampleEvalResult:
-    """Route labeled sample rows blind to their expected outputs, then score them."""
+    """Route labeled sample rows blind to their expected outputs, then score them.
+
+    `workers` > 1 scores rows concurrently -- only safe against an endpoint that won't
+    choke on concurrent requests.
+    """
     if not os.path.exists(sample_path):
         raise DatasetError(f"Sample eval input not found: {sample_path}.")
     try:
@@ -122,37 +160,13 @@ def run_sample_eval(
         frame = frame.head(limit)
 
     result = SampleEvalResult()
-    for index, row in frame.iterrows():
-        message_id = row["message_id"]
-        try:
-            input_row = row[[column for column in INPUT_COLUMNS if column in row.index]]
-            content = build_user_content(input_row)
-            agent_result = run_agent(DEFAULT_SYSTEM_PROMPT, content, max_steps=max_steps)
-            if agent_result.hit_step_limit:
-                error_message = describe_step_limit(max_steps)
-                logger.warning("sample eval hit step limit for %s: %s", message_id, error_message)
-                record = {"message_id": message_id, "ok": False, "error": error_message}
-            else:
-                prediction = parse_result(agent_result.final_text, message_id)
-                expected_evidence = parse_evidence_ids(row.get("evidence_message_ids"))
-                record = {
-                    "message_id": message_id,
-                    "ok": True,
-                    "predicted_action": prediction.action,
-                    "expected_action": row["action"],
-                    "action_correct": prediction.action == row["action"],
-                    "predicted_message_type": prediction.message_type,
-                    "expected_message_type": row["message_type"],
-                    "message_type_correct": prediction.message_type == row["message_type"],
-                    "confidence": prediction.confidence,
-                    "evidence_overlap": evidence_overlap(prediction.evidence_message_ids, expected_evidence),
-                }
-                logger.info("[%d/%d] scored %s", index + 1, len(frame), message_id)
-        except DatasetError:
-            raise
-        except Exception as exc:
-            error = classify_llm_error(exc)
-            logger.warning("sample eval failed for %s, skipping: %s", message_id, error)
-            record = {"message_id": message_id, "ok": False, "error": error.user_message}
-        result.rows.append(record)
+    total = len(frame)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {executor.submit(_score_sample_row, row, max_steps): row["message_id"] for _, row in frame.iterrows()}
+        for future in as_completed(futures):
+            record = future.result()
+            result.rows.append(record)
+            completed += 1
+            logger.info("[%d/%d] scored %s", completed, total, record["message_id"])
     return result
