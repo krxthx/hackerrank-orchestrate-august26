@@ -33,6 +33,11 @@ TRANSCRIPTS_DIR = "transcripts"
 DATA_INPUT_DIR = "data/input"
 DATA_OUTPUT_DIR = "data/output"
 
+# Where run_eval.py's --report defaults to. Independent of DATA_OUTPUT_DIR (checkpoints/
+# caches/output.csv diff-copy) so eval reports ship inside code.zip without dragging those
+# scratch artifacts in with them.
+EVAL_REPORTS_DIR = "code/eval_reports"
+
 # Participant-facing dataset for this challenge (Message Notification Router).
 DATASET_DIR = "dataset"
 

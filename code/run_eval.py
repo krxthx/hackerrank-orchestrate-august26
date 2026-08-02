@@ -7,8 +7,8 @@ Usage:
     python code/run_eval.py all               # both
     python code/run_eval.py judge --limit 10  # smoke test on the first N rows
 
-Writes a JSON report to data/output/eval_report.json (per-row detail + aggregate summary)
-and prints the summary to stdout.
+Writes a JSON report to code/eval_reports/eval_report.json (per-row detail + aggregate
+summary) and prints the summary to stdout.
 """
 
 import argparse
@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from orchestrate.core.config import DATA_OUTPUT_DIR, JUDGE_MODEL  # noqa: E402
+from orchestrate.core.config import EVAL_REPORTS_DIR, JUDGE_MODEL  # noqa: E402
 from orchestrate.core.errors import fatal_error_boundary  # noqa: E402
 from orchestrate.evaluation import run_judge_eval, run_sample_eval, write_report  # noqa: E402
 
@@ -36,7 +36,7 @@ def main() -> None:
         "critiques the router's presented decision instead of comparing it to its own).",
     )
     parser.add_argument(
-        "--report", default=os.path.join(DATA_OUTPUT_DIR, "eval_report.json"), help="Where to write the JSON report."
+        "--report", default=os.path.join(EVAL_REPORTS_DIR, "eval_report.json"), help="Where to write the JSON report."
     )
     parser.add_argument(
         "--workers", type=int, default=1, help="Score this many judge-eval rows concurrently (judge mode only)."

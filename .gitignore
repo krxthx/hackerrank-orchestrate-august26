@@ -9,3 +9,4 @@ data/cache/
 *.egg-info/
 .DS_Store
 transcripts/
+code/eval_reports/

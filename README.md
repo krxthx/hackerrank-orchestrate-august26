@@ -332,8 +332,10 @@ endpoint that tolerates concurrent requests, such as a dedicated proxy rather th
 free-tier one. `--workers 8` cut a 20-row `judge` smoke test from ~13 minutes (8 rows,
 sequential) to ~3 minutes (20 rows, concurrent).
 
-Both write a per-row + aggregate-summary JSON report to `data/output/eval_report.json` (or
-wherever `--report` points).
+Both write a per-row + aggregate-summary JSON report to `code/eval_reports/eval_report.json`
+by default (or wherever `--report` points) — inside `code/` rather than `data/output/` (which
+holds scratch checkpoints/caches and an `output.csv` diff-copy) so a report ships with
+`code.zip` without dragging that scratch state along.
 
 ## Output schema
 
